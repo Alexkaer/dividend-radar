@@ -10,11 +10,12 @@ permissions:
   pages: write
   id-token: write
 concurrency:
-  group: dividend-pages
+  group: dividend-pages-v2
   cancel-in-progress: false
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
