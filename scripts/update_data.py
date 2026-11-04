@@ -85,6 +85,8 @@ def main():
     for code,q in quotes.items():
         price=number(q['f2']); records=dividends.get(code,[])
         if not price or price<=0 or not records: continue
+        cap=number(q['f20'])
+        if cap is None or cap<=50_000_000_000: continue
         cash=sum(x['cash'] for x in records); y=cash/price*100
         if y<=5: continue
         stocks.append(dict(code=code,name=q['f14'],market='沪市' if q['f13']==1 else ('北交所' if code[0] in '489' else '深市'),price=price,change=number(q['f3']),yieldRate=round(y,4),cash=round(cash,6),pe=number(q['f115']),pb=number(q['f23']),cap=number(q['f20']),quoteTime=q.get('f124'),dividends=records))
