@@ -1,0 +1,50 @@
+name: Daily strategy screen
+on:
+  schedule:
+    - cron: '45 7 * * 1-5'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: private-strategy-screen
+  cancel-in-progress: false
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify strategy rules and encryption
+        run: |
+          python scripts/test_strategy.py
+          node scripts/test_strategy_crypto.cjs
+      - name: Screen with Eastmoney MX and encrypt results
+        env:
+          MX_APIKEY: ${{ secrets.MX_APIKEY }}
+          STRATEGY_LOGIN_USERNAME: ${{ secrets.STRATEGY_LOGIN_USERNAME }}
+          STRATEGY_LOGIN_PASSWORD: ${{ secrets.STRATEGY_LOGIN_PASSWORD }}
+        run: |
+          umask 077
+          python scripts/strategy_screen.py --output "$RUNNER_TEMP/private-strategy.json"
+          if [ -f "$RUNNER_TEMP/private-strategy.json" ]; then
+            node scripts/encrypt_strategy.cjs "$RUNNER_TEMP/private-strategy.json" data/strategies.enc.json
+            rm "$RUNNER_TEMP/private-strategy.json"
+          fi
+      - name: Publish encrypted snapshot only
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/strategies.enc.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'data: update encrypted private strategy snapshot'
+            git pull --rebase origin main
+            git push origin main
+          fi

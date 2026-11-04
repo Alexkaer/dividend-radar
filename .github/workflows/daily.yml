@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_run:
+    workflows: ['Daily strategy screen']
+    types: [completed]
 permissions:
   contents: write
   pages: write
@@ -12,6 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -40,8 +44,11 @@ jobs:
           node --check visitor-count.js
           node --check dialog-dismiss.js
           node scripts/test_hardware_metrics.cjs
+          node --check strategy.js
+          python scripts/test_strategy.py
+          node scripts/test_strategy_crypto.cjs
       - name: Refresh complete market data
-        if: github.event_name != 'push'
+        if: github.event_name == 'workflow_dispatch'
         id: refresh
         continue-on-error: true
         run: python scripts/update_data.py
@@ -51,7 +58,7 @@ jobs:
           echo '::warning::Refresh failed. Publishing last valid snapshot with its original timestamp.'
           test -f data/stocks.json
       - name: Refresh closing market overview
-        if: github.event_name != 'push'
+        if: github.event_name == 'workflow_dispatch'
         id: market_refresh
         continue-on-error: true
         run: python scripts/update_market.py
@@ -61,7 +68,7 @@ jobs:
           echo '::warning::Market refresh failed. Retaining original market snapshot date.'
           test -f data/market.json
       - name: Refresh hardware fallback snapshot
-        if: github.event_name != 'push'
+        if: github.event_name == 'workflow_dispatch'
         id: hardware_refresh
         continue-on-error: true
         run: |
@@ -79,7 +86,9 @@ jobs:
         run: |
           mkdir -p _site/data
           cp index.html style.css app.js share.js live-data.js market.html market.css market.js hardware.html hardware.css hardware.js hardware-metrics.js visitor-count.js dialog-dismiss.js _site/
+          cp strategy.html strategy.css strategy.js _site/
           cp data/stocks.json data/market.json data/hardware.json data/hardware-universe.json _site/data/
+          cp data/strategies.enc.json _site/data/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
