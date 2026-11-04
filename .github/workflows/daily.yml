@@ -45,6 +45,8 @@ jobs:
           node --check dialog-dismiss.js
           node scripts/test_hardware_metrics.cjs
           node --check strategy.js
+          node --check strategy-ranking.js
+          node scripts/test_strategy_ranking.cjs
           python scripts/test_strategy.py
           node scripts/test_strategy_crypto.cjs
       - name: Refresh complete market data
@@ -86,7 +88,7 @@ jobs:
         run: |
           mkdir -p _site/data
           cp index.html style.css app.js share.js live-data.js market.html market.css market.js hardware.html hardware.css hardware.js hardware-metrics.js visitor-count.js dialog-dismiss.js _site/
-          cp strategy.html strategy.css strategy.js _site/
+          cp strategy.html strategy.css strategy.js strategy-ranking.js _site/
           cp data/stocks.json data/market.json data/hardware.json data/hardware-universe.json _site/data/
           cp data/strategies.enc.json _site/data/
       - uses: actions/configure-pages@v5

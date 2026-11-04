@@ -26,6 +26,7 @@ jobs:
         run: |
           python scripts/test_strategy.py
           node scripts/test_strategy_crypto.cjs
+          node scripts/test_strategy_ranking.cjs
       - name: Screen with Eastmoney MX and encrypt results
         env:
           MX_APIKEY: ${{ secrets.MX_APIKEY }}

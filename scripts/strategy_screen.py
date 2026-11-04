@@ -123,6 +123,7 @@ def evaluate(bars):
     def record(kind, event, low, zone, status, evidence):
         found[kind] = dict(signalDate=event['date'], close=last['close'], change=last['change'],
             status=status, zone=[round(x, 3) for x in zone], invalidation=round(low,3), evidence=evidence,
+            volumeRatio=round(last['volume']/event['volume'],4) if event['volume']>0 else None,
             confirmation='分时VWAP、板块强度与指定时段承接未查询；完成日线条件不等于买入信号',
             exit='收盘跌破防守位退出；冲高失去VWAP或量价转弱先减仓。')
     # Historical official limit status is independent of price adjustment.
@@ -167,6 +168,7 @@ def evaluate(bars):
         one_price=any(abs(bars[k]['high']-bars[k]['low'])<.005 for k in range(start,end+1))
         record('second', bars[end], guard,[ma*.99,ma*1.01], '缩量回踩 · 待承接' if count==2 and not one_price else '高风险形态 · 仅观察',
             f"真实连续{count}板 {bars[start]['date']}~{bars[end]['date']}；断板后{age}日；量/断板量={last['volume']/broken['volume']:.2f}；MA10={ma:.2f}" + ('；含一字板' if one_price else ''))
+        found['second']['volumeRatio']=round(last['volume']/broken['volume'],4)
         break
     # 20-session limit-up, real retreat and closing bullish recovery near MA10.
     for i in range(len(bars)-3, max(-1,len(bars)-21), -1):

@@ -1,0 +1,18 @@
+const assert=require('node:assert/strict'),{rank,quoteState}=require('../strategy-ranking.js');
+const now=Date.parse('2026-11-04T06:00:00Z'),time=now/1000;
+const item={code:'000001',name:'fixture',status:'缩量回踩 · 待承接',zone:[10,10.2],invalidation:9.7,volumeRatio:.3};
+const quotes={'000001':{price:10.1,change:2,time}};
+assert.equal(rank({second:[item]},quotes,'2026-11-04',now).top.length,1);
+assert.equal(rank({second:[item],pullback:[item]},quotes,'2026-11-04',now).top.length,1);
+assert.equal(rank({second:[item],pullback:[item]},quotes,'2026-11-04',now).top[0].strategies.length,2);
+for(const price of [9.6,11])assert.equal(rank({second:[item]},{'000001':{price,change:2,time}},'2026-11-04',now).top.length,0);
+for(const change of [5,-5])assert.equal(rank({second:[item]},{'000001':{price:10.1,change,time}},'2026-11-04',now).top.length,0);
+assert.equal(rank({second:[item]}, {}, '2026-11-04',now).top.length,0);
+assert.equal(quoteState({...quotes['000001'],time:time-601},now).valid,false);
+assert.equal(quoteState({...quotes['000001'],time:time+1000},now).valid,false);
+assert.equal(rank({second:[{...item,status:'高风险形态 · 仅观察'}]},quotes,'2026-11-04',now).top.length,0);
+assert.equal(rank({second:[item]},quotes,'2026-10-20',now).top.length,0);
+const seven=Array.from({length:7},(_,i)=>({...item,code:String(i).padStart(6,'0')}));
+const many=Object.fromEntries(seven.map(x=>[x.code,{price:10.1,change:2,time}]));
+assert.equal(rank({second:seven},many,'2026-11-04',now).top.length,5);
+console.log('Top-five deduplication, risk gates, stale data and ranking checks passed.');
