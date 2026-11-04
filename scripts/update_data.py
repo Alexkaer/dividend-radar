@@ -23,9 +23,7 @@ def number(v):
         return n if math.isfinite(n) else None
     except (ValueError,TypeError): return None
 
-def main():
-    now = datetime.now(ZoneInfo('Asia/Shanghai'))
-    today=now.date(); start=today-timedelta(days=365)
+def get_quotes():
     quotes={}; page=1
     while True:
         d=fetch('https://push2.eastmoney.com/api/qt/clist/get',dict(pn=page,pz=100,np=1,fltt=2,invt=2,po=1,fid='f12',fs='m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048',fields='f12,f13,f14,f2,f3,f20,f23,f115,f124'))['data']
@@ -35,6 +33,36 @@ def main():
         if page*100>=d['total']: break
         page+=1
     if len(quotes)<4500 or len(quotes)!=d['total']: raise RuntimeError('全市场行情覆盖不完整')
+    return quotes
+
+def closing_quotes():
+    url='https://datacenter-web.eastmoney.com/api/data/v1/get'
+    params=dict(reportName='RPT_VALUEANALYSIS_DET',columns='ALL',pageSize=500,pageNumber=1,sortColumns='TRADE_DATE,SECURITY_CODE',sortTypes='-1,1')
+    latest=fetch(url,dict(params,pageSize=1,filter='(SECURITY_CODE="601988")',sortColumns='TRADE_DATE',sortTypes='-1'))['result']['data'][0]['TRADE_DATE']
+    params['filter']=f'(TRADE_DATE=\'{latest[:10]}\')'
+    stamp=int(datetime.fromisoformat(latest[:10]+'T15:00:00+08:00').timestamp())
+    quotes={}; total=0
+    while True:
+        d=fetch(url,params)['result']; total+=len(d['data'])
+        for r in d['data']:
+            code=r['SECURITY_CODE']
+            quotes[code]=dict(f12=code,f13=1 if r['SECUCODE'].endswith('.SH') else 0,f14=r['SECURITY_NAME_ABBR'],f2=r['CLOSE_PRICE'],f3=r['CHANGE_RATE'],f20=r['TOTAL_MARKET_CAP'],f23=r['PB_MRQ'],f115=r['PE_TTM'],f124=stamp)
+        if params['pageNumber']>=d['pages']: break
+        params['pageNumber']+=1
+    if total!=d['count'] or len(quotes)!=total or total<4500: raise RuntimeError('备用收盘行情覆盖不足')
+    print(f'Using closing valuation snapshot: {latest}, {total} stocks')
+    return quotes
+
+def main():
+    now = datetime.now(ZoneInfo('Asia/Shanghai'))
+    today=now.date(); start=today-timedelta(days=365)
+    try: quotes=get_quotes()
+    except Exception as e:
+        print(f'Primary quotes unavailable: {e}; trying closing valuation dataset')
+        quotes=closing_quotes()
+        # Align the dividend window with the closing quote, avoiding future dividends.
+        today=datetime.fromtimestamp(max(q['f124'] for q in quotes.values()),ZoneInfo('Asia/Shanghai')).date()
+        start=today-timedelta(days=365)
     dividends={}; seen=set(); total=0; page=1
     while True:
         result=fetch('https://datacenter-web.eastmoney.com/api/data/v1/get',dict(reportName='RPT_SHAREBONUS_DET',columns='ALL',pageSize=500,pageNumber=page,sortColumns='EX_DIVIDEND_DATE,SECURITY_CODE,REPORT_DATE',sortTypes='-1,1,-1',filter=f'(EX_DIVIDEND_DATE>\'{start}\')(EX_DIVIDEND_DATE<=\'{today}\')(ASSIGN_PROGRESS="实施分配")'))
@@ -54,7 +82,7 @@ def main():
         price=number(q['f2']); records=dividends.get(code,[])
         if not price or price<=0 or not records: continue
         cash=sum(x['cash'] for x in records); y=cash/price*100
-        if y<=4.5: continue
+        if y<=5: continue
         stocks.append(dict(code=code,name=q['f14'],market='沪市' if q['f13']==1 else ('北交所' if code[0] in '489' else '深市'),price=price,change=number(q['f3']),yieldRate=round(y,4),cash=round(cash,6),pe=number(q['f115']),pb=number(q['f23']),cap=number(q['f20']),quoteTime=q.get('f124'),dividends=records))
     stocks.sort(key=lambda x:x['yieldRate'],reverse=True)
     if not stocks: raise RuntimeError('筛选结果异常为空')
