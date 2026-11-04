@@ -50,6 +50,7 @@
   $('segmentCards').onclick=e=>{const b=e.target.closest('[data-group]');if(b){$('hardwareGroup').value=$('hardwareGroup').value===b.dataset.group?'all':b.dataset.group;render()}};
   $('hardwareGroup').onchange=render;$('leaderMode').onchange=render;$('hardwareSearch').oninput=render;$('hardwareSort').onchange=render;
   $('clearHardwareFilter').onclick=()=>{$('hardwareGroup').value='all';$('hardwareSearch').value='';render()};
+  $('hardwareDetail').addEventListener('close',()=>{activeDetail=null});
   $('refreshHardware').onclick=refresh;$('addHardware').onclick=()=>{$('hardwareAddMessage').textContent='';$('hardwareAddDialog').showModal()};$('closeHardwareAdd').onclick=()=>$('hardwareAddDialog').close();$('closeHardwareDetail').onclick=()=>{activeDetail=null;$('hardwareDetail').close()};
   $('hardwareAddForm').onsubmit=async e=>{e.preventDefault();const code=$('newHardwareCode').value.trim(),group=$('newHardwareGroup').value;if(!/^(?:00|30|60|68|43|83|87|88|92)\d{4}$/.test(code)){$('hardwareAddMessage').textContent='请输入有效A股六位代码。';return}if(definitions().some(s=>s.code===code)){$('hardwareAddMessage').textContent='该股票已在观察池中，无需重复添加。';return}if(custom.length>=100){$('hardwareAddMessage').textContent='自定义标的已达100只，请先移除不再观察的股票。';return}
     $('confirmHardwareAdd').disabled=true;$('hardwareAddMessage').textContent='正在查询名称与行情…';

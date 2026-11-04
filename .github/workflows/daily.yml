@@ -38,6 +38,7 @@ jobs:
           node --check hardware.js
           node --check hardware-metrics.js
           node --check visitor-count.js
+          node --check dialog-dismiss.js
           node scripts/test_hardware_metrics.cjs
       - name: Refresh complete market data
         if: github.event_name != 'push'
@@ -77,7 +78,7 @@ jobs:
       - name: Prepare public files
         run: |
           mkdir -p _site/data
-          cp index.html style.css app.js share.js live-data.js market.html market.css market.js hardware.html hardware.css hardware.js hardware-metrics.js visitor-count.js _site/
+          cp index.html style.css app.js share.js live-data.js market.html market.css market.js hardware.html hardware.css hardware.js hardware-metrics.js visitor-count.js dialog-dismiss.js _site/
           cp data/stocks.json data/market.json data/hardware.json data/hardware-universe.json _site/data/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
