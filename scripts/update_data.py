@@ -1,5 +1,5 @@
 """Fetch complete A-share quotes and implemented cash dividends; fail closed."""
-import json, math, time, urllib.request, urllib.parse
+import json, math, os, time, urllib.request, urllib.parse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -56,13 +56,17 @@ def closing_quotes():
 def main():
     now = datetime.now(ZoneInfo('Asia/Shanghai'))
     today=now.date(); start=today-timedelta(days=365)
-    try: quotes=get_quotes()
+    try:
+        if os.environ.get('GITHUB_ACTIONS') == 'true':
+            quotes=closing_quotes()
+        else:
+            quotes=get_quotes()
     except Exception as e:
         print(f'Primary quotes unavailable: {e}; trying closing valuation dataset')
         quotes=closing_quotes()
-        # Align the dividend window with the closing quote, avoiding future dividends.
-        today=datetime.fromtimestamp(max(q['f124'] for q in quotes.values()),ZoneInfo('Asia/Shanghai')).date()
-        start=today-timedelta(days=365)
+    # Align dividends with the quote date, including when a prior close is used.
+    today=datetime.fromtimestamp(max(q['f124'] for q in quotes.values()),ZoneInfo('Asia/Shanghai')).date()
+    start=today-timedelta(days=365)
     dividends={}; seen=set(); total=0; page=1
     while True:
         result=fetch('https://datacenter-web.eastmoney.com/api/data/v1/get',dict(reportName='RPT_SHAREBONUS_DET',columns='ALL',pageSize=500,pageNumber=page,sortColumns='EX_DIVIDEND_DATE,SECURITY_CODE,REPORT_DATE',sortTypes='-1,1,-1',filter=f'(EX_DIVIDEND_DATE>\'{start}\')(EX_DIVIDEND_DATE<=\'{today}\')(ASSIGN_PROGRESS="实施分配")'))
