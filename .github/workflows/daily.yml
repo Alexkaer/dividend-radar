@@ -1,0 +1,56 @@
+name: Update dividend radar and deploy
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '30 10 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: dividend-pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Refresh complete market data
+        id: refresh
+        continue-on-error: true
+        run: python scripts/update_data.py
+      - name: Preserve last valid snapshot on failure
+        if: steps.refresh.outcome == 'failure'
+        run: |
+          echo '::warning::Refresh failed. Publishing last valid snapshot with its original timestamp.'
+          test -f data/stocks.json
+      - name: Commit successful snapshot
+        if: steps.refresh.outcome == 'success'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/stocks.json
+          git diff --cached --quiet || git commit -m 'data: refresh dividend snapshot'
+          git push
+      - name: Prepare public files
+        run: |
+          mkdir -p _site/data
+          cp index.html style.css app.js _site/
+          cp data/stocks.json _site/data/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - uses: actions/deploy-pages@v4
+        id: deployment
+      - name: Report refresh failure
+        if: steps.refresh.outcome == 'failure'
+        run: exit 1
