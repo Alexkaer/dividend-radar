@@ -1,0 +1,4 @@
+__pycache__/
+*.tmp
+_site/
+*.png
