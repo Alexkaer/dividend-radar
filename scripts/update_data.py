@@ -6,9 +6,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 def fetch(url, params):
+    hosts = [url]
+    if 'push2.eastmoney.com' in url:
+        hosts += [url.replace('push2.eastmoney.com', h) for h in ['push2delay.eastmoney.com','82.push2.eastmoney.com','push2his.eastmoney.com']]
     for attempt in range(4):
         try:
-            req = urllib.request.Request(url+'?'+urllib.parse.urlencode(params), headers={'User-Agent':'Mozilla/5.0','Referer':'https://data.eastmoney.com/'})
+            req = urllib.request.Request(hosts[attempt % len(hosts)]+'?'+urllib.parse.urlencode(params), headers={'User-Agent':'Mozilla/5.0','Referer':'https://data.eastmoney.com/'})
             with urllib.request.urlopen(req, timeout=45) as r: return json.load(r)
         except Exception:
             if attempt == 3: raise
