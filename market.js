@@ -1,0 +1,38 @@
+(() => {
+  const $=id=>document.getElementById(id);
+  const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmt=(v,d=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});
+  const pct=v=>v==null?'—':(v>0?'+':'')+fmt(v)+'%';
+  const tone=v=>v>0?'up':v<0?'down':'muted';
+  function volumeSVG(days){
+    const width=1100,height=300,left=65,right=25,top=28,bottom=50,plot=width-left-right,max=Math.max(...days.map(r=>r.amount))*1.18;
+    const y=v=>height-bottom-(v/max)*(height-top-bottom),step=plot/days.length;
+    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="最近10个交易日沪深成交额柱状图，完整数值见下方逐日表">${[0,.5,1].map(f=>`<line x1="${left}" x2="${width-right}" y1="${y(max*f)}" y2="${y(max*f)}" stroke="#253a43" stroke-dasharray="4 7"/><text x="${left-12}" y="${y(max*f)+5}" text-anchor="end" fill="#718c98" font-size="13">${(max*f/1e12).toFixed(1)}</text>`).join('')}<text x="${left}" y="15" fill="#718c98" font-size="12">万亿元</text>${days.map((r,i)=>{const x=left+step*i+step*.2,barWidth=step*.6;return `<g><title>${esc(r.date)}：${fmt(r.amount/1e8)}亿元</title><rect x="${x}" y="${y(r.amount)}" width="${barWidth}" height="${height-bottom-y(r.amount)}" fill="${i===days.length-1?'#dcff75':'#7dfbd3'}" opacity="${i===days.length-1?1:.35+i*.05}"/><text x="${x+barWidth/2}" y="${y(r.amount)-10}" text-anchor="middle" font-size="13" fill="#c2ddd3">${fmt(r.amount/1e12,2)}</text><text x="${x+barWidth/2}" y="${height-bottom+27}" text-anchor="middle" font-size="12" fill="#8da7b0">${r.date.slice(5).replace('-','/')}</text></g>`}).join('')}</svg>`;
+  }
+  function render(d){
+    if(!d.indices?.length||d.turnover?.days?.length!==10||d.sectors?.items?.length!==15)throw Error('快照不完整');
+    $('marketDate').textContent=d.asOf;
+    $('marketState').textContent='快照生成 '+new Date(d.updatedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
+    const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'});
+    if(d.asOf!==today)$('marketAlert').textContent='当前展示 '+d.asOf+' 的收盘快照，可能因休市或更新延迟。请核对日期。';
+    $('indices').innerHTML=d.indices.map(r=>`<article><div><span>${esc(r.name)}</span><small>${esc(r.code)}</small></div><b>${fmt(r.close)}</b><strong class="${tone(r.change)}">${pct(r.change)}</strong><small>收盘 · ${esc(r.date)}</small></article>`).join('');
+    const b=d.breadth,m=d.sentiment,l=d.limits;
+    $('moodScore').textContent=m.score??'—';$('moodLabel').textContent=m.label;
+    $('moodDial').style.setProperty('--score',Math.max(0,Math.min(100,m.score||0))+'%');
+    $('moodSummary').textContent=m.score==null?'同日有效数据不足，暂不判断。':`上涨 ${fmt(b.up,0)} 家 / 下跌 ${fmt(b.down,0)} 家，涨停池 ${l.up} 家 / 跌停池 ${l.down} 家。`;
+    $('moodMethod').textContent=m.method||'同日有效样本不足。';
+    $('breadthScope').textContent='有效行情 '+fmt(b.total,0)+' 家';
+    $('breadthNumbers').innerHTML=[['上涨',b.up,'up'],['下跌',b.down,'down'],['平盘 / 停牌',b.flat,'muted']].map(([label,n,cls])=>`<div><small>${label}</small><b class="${cls}">${fmt(n,0)}</b></div>`).join('');
+    $('breadthBar').innerHTML=[['#ff869b',b.up],['#7dfbd3',b.down],['#566c78',b.flat]].map(([c,n])=>`<span style="background:${c};width:${n/b.total*100}%"></span>`).join('');
+    $('limitUp').textContent=fmt(l.up,0);$('limitDown').textContent=fmt(l.down,0);$('advanceShare').textContent=b.advanceShare==null?'—':fmt(b.advanceShare*100,1)+'%';$('limitScope').textContent=l.scope;
+    const v=d.turnover;
+    $('volumeMetrics').innerHTML=[['今日成交额',fmt(v.today/1e12)+' 万亿',''],['较昨日',pct(v.dayChangePct),tone(v.dayChangePct)],['近5日较此前5日',pct(v.fiveDayChangePct),tone(v.fiveDayChangePct)],['最近5日日均',fmt(v.recentFiveDayAverage/1e12)+' 万亿','']].map(([label,value,cls])=>`<div><small>${label}</small><b class="${cls}">${value}</b></div>`).join('');
+    $('volumeChart').innerHTML=volumeSVG(v.days);$('volumeScope').textContent=v.scope;
+    $('volumeRows').innerHTML=v.days.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.shanghai/1e8)}</td><td>${fmt(r.shenzhen/1e8)}</td><td>${fmt(r.amount/1e8)}</td></tr>`).join('');
+    const items=d.sectors.items,max=Math.max(...items.map(r=>Math.abs(r.fiveDayChange)),1);
+    $('sectorWindow').textContent=items[0].startDate+' → '+items[0].endDate+' / 5个交易日';
+    $('sectorList').innerHTML=items.map((r,i)=>`<a class="sector-row" href="https://quote.eastmoney.com/bk/90.${esc(r.code)}.html" target="_blank" rel="noopener"><span class="rank">${String(i+1).padStart(2,'0')}</span><div class="sector-name"><b>${esc(r.name)}</b><small>${esc(r.code)}</small></div><div class="sector-track"><i style="width:${Math.abs(r.fiveDayChange)/max*100}%"></i></div><b class="${tone(r.fiveDayChange)}">${pct(r.fiveDayChange)}</b><small>今日 <span class="${tone(r.change)}">${pct(r.change)}</span></small><span class="sector-arrow">↗</span></a>`).join('');
+    $('sectorScope').textContent=d.sectors.scope+' 共比较 '+d.sectors.universe+' 个板块指数。';
+  }
+  fetch('./data/market.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('HTTP '+r.status);return r.json()}).then(render).catch(error=>{$('marketState').textContent='数据暂不可用';$('marketAlert').textContent='未能载入有效大盘快照，请稍后刷新或查看 GitHub 更新任务。';console.error(error)});
+})();
