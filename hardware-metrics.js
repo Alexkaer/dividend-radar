@@ -1,6 +1,6 @@
 /* Comparable prices and reproducible scale-leader selection. */
 (function(root){
-  function leaders(stocks,count=2){const groups=new Map();for(const s of stocks){if(s.custom||!Number.isFinite(s.cap)||s.cap<=0)continue;if(!groups.has(s.group))groups.set(s.group,[]);groups.get(s.group).push(s)}const ranks=new Map();for(const list of groups.values())list.sort((a,b)=>b.cap-a.cap||a.code.localeCompare(b.code)).slice(0,count).forEach((s,i)=>ranks.set(s.code,i+1));return ranks}
+  function leaders(stocks,count=3){const groups=new Map();for(const s of stocks){if(s.custom||!Number.isFinite(s.cap)||s.cap<=0)continue;if(!groups.has(s.group))groups.set(s.group,[]);groups.get(s.group).push(s)}const ranks=new Map();for(const list of groups.values())list.sort((a,b)=>b.cap-a.cap||a.code.localeCompare(b.code)).slice(0,count).forEach((s,i)=>ranks.set(s.code,i+1));return ranks}
   function historicalHigh(data,price,asOf){
     const rows=(data?.klines||[]).map(line=>{const r=line.split(',');return {date:r[0],high:Number(r[3])}}).filter(r=>r.date<=asOf&&Number.isFinite(r.high)).sort((a,b)=>a.date.localeCompare(b.date));
     if(!rows.length)throw Error('历史K线不可用');let peak=rows[0];for(const r of rows)if(r.high>peak.high)peak=r;if(peak.high<=0)throw Error('高点价格无效');
