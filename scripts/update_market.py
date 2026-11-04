@@ -67,7 +67,14 @@ def sector_ranking(as_of):
         if abs(value-row['f109'])>0.08:raise ValueError('Sector five-session field mismatch')
         return dict(code=row['f12'],name=row['f14'],change=number(row.get('f3')),fiveDayChange=round(value,2),startDate=bars[-6]['date'],endDate=bars[-1]['date'])
     with ThreadPoolExecutor(max_workers=4) as pool: top=list(pool.map(verify,ranked))
-    return dict(items=top,universe=d['total'],scope='东方财富行业板块（含不同层级，可能存在重叠），不含概念板块；最近5个交易日收盘涨幅，已逐一用6根日K核对前15。')
+    def daily_verify(row):
+        bars=[r for r in kline('90.'+row['f12'],3) if r['date']<=as_of]
+        if len(bars)<2 or bars[-1]['date']!=as_of:raise ValueError('Daily sector date mismatch')
+        value=(bars[-1]['close']/bars[-2]['close']-1)*100
+        if abs(value-row['f3'])>0.08:raise ValueError('Daily sector field mismatch')
+        return dict(code=row['f12'],name=row['f14'],change=round(value,2),startDate=bars[-2]['date'],endDate=bars[-1]['date'])
+    with ThreadPoolExecutor(max_workers=4) as pool: today=list(pool.map(daily_verify,sorted([r for r in rows if number(r.get('f3')) is not None],key=lambda r:r['f3'],reverse=True)[:15]))
+    return dict(items=top,todayItems=today,universe=d['total'],scope='东方财富行业板块（含不同层级，可能存在重叠），不含概念板块；当日与5日榜各前15，分别用日K核对。')
 
 def main():
     now=datetime.now(ZoneInfo('Asia/Shanghai'));quotes=closing_quotes()

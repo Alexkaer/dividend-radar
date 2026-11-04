@@ -1,5 +1,5 @@
 (() => {
-  const $=id=>document.getElementById(id);
+  const $=id=>document.getElementById(id);let sectorPeriod='day',sectorData=null;
   const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const fmt=(v,d=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});
   const pct=v=>v==null?'—':(v>0?'+':'')+fmt(v)+'%';
@@ -29,11 +29,18 @@
     $('volumeMetrics').innerHTML=[[intraday?'当前累计成交额':'今日成交额',fmt(v.today/1e12)+' 万亿',''],[intraday?'当前累计较昨全日':'较昨日',pct(v.dayChangePct),tone(v.dayChangePct)],[intraday?'近5日比较（含盘中）':'近5日较此前5日',pct(v.fiveDayChangePct),tone(v.fiveDayChangePct)],['最近5日日均',fmt(v.recentFiveDayAverage/1e12)+' 万亿','']].map(([label,value,cls])=>`<div><small>${label}</small><b class="${cls}">${value}</b></div>`).join('');
     $('volumeChart').innerHTML=volumeSVG(v.days);$('volumeScope').textContent=v.scope;
     $('volumeRows').innerHTML=v.days.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.shanghai/1e8)}</td><td>${fmt(r.shenzhen/1e8)}</td><td>${fmt(r.amount/1e8)}</td></tr>`).join('');
-    const items=d.sectors.items,max=Math.max(...items.map(r=>Math.abs(r.fiveDayChange)),1);
-    $('sectorWindow').textContent=items[0].startDate+' → '+items[0].endDate+' / 5个交易日';
-    $('sectorList').innerHTML=items.map((r,i)=>`<a class="sector-row" href="https://quote.eastmoney.com/bk/90.${esc(r.code)}.html" target="_blank" rel="noopener"><span class="rank">${String(i+1).padStart(2,'0')}</span><div class="sector-name"><b>${esc(r.name)}</b><small>${esc(r.code)}</small></div><div class="sector-track"><i style="width:${Math.abs(r.fiveDayChange)/max*100}%"></i></div><b class="${tone(r.fiveDayChange)}">${pct(r.fiveDayChange)}</b><small>今日 <span class="${tone(r.change)}">${pct(r.change)}</span></small><span class="sector-arrow">↗</span></a>`).join('');
-    $('sectorScope').textContent=d.sectors.scope+' 共比较 '+d.sectors.universe+' 个板块指数。';
+    sectorData=d.sectors;renderSectors();
   }
+  function renderSectors(){
+    if(!sectorData)return;const daily=sectorPeriod==='day',items=daily?sectorData.todayItems||[]:sectorData.items||[],metric=r=>daily?r.change:r.fiveDayChange,max=Math.max(...items.map(r=>Math.abs(metric(r))),1);
+    $('sectorTitle').innerHTML=(daily?'当日领涨行业':'近5日领涨行业')+' <span>TOP 15</span>';
+    document.querySelectorAll('#sectorPeriods button').forEach(b=>b.classList.toggle('selected',b.dataset.period===sectorPeriod));
+    $('sectorWindow').textContent=items.length?(daily?items[0].endDate+' / 当日':items[0].startDate+' → '+items[0].endDate+' / 5个交易日'):'该周期榜单待刷新';
+    $('sectorList').innerHTML=items.length?items.map((r,i)=>`<a class="sector-row" href="https://quote.eastmoney.com/bk/90.${esc(r.code)}.html" target="_blank" rel="noopener"><span class="rank">${String(i+1).padStart(2,'0')}</span><div class="sector-name"><b>${esc(r.name)}</b><small>${esc(r.code)}</small></div><div class="sector-track"><i style="width:${Math.abs(metric(r))/max*100}%"></i></div><b class="${tone(metric(r))}">${pct(metric(r))}</b><small>${daily?'当日涨幅':'今日 '+pct(r.change)}</small><span class="sector-arrow">↗</span></a>`).join(''):'<p class="market-footnote">当日榜数据待刷新，不使用5日榜代替。</p>';
+    $('sectorScope').textContent=sectorData.scope+' 共比较 '+sectorData.universe+' 个板块指数。';
+  }
+  $('sectorPeriods').onclick=e=>{const b=e.target.closest('[data-period]');if(b){sectorPeriod=b.dataset.period;renderSectors()}};
+
   let current=null,busy=false;
   async function refresh(){if(busy)return;busy=true;$('refreshMarket').disabled=true;$('refreshMarket').textContent='↻ 正在刷新…';
     try{const d=await window.RadarLive.refreshMarket(current,message=>{$('marketState').textContent=message});render(d);current=d;window.RadarLive.cache.put('market',d)}

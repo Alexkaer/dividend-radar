@@ -36,6 +36,8 @@ jobs:
           node --check live-data.js
           node --check share.js
           node --check hardware.js
+          node --check hardware-metrics.js
+          node scripts/test_hardware_metrics.cjs
       - name: Refresh complete market data
         if: github.event_name != 'push'
         id: refresh
@@ -60,7 +62,9 @@ jobs:
         if: github.event_name != 'push'
         id: hardware_refresh
         continue-on-error: true
-        run: python scripts/update_hardware.py
+        run: |
+          python scripts/update_hardware.py
+          node scripts/refresh_hardware_details.cjs
       - name: Commit successful snapshots
         if: steps.refresh.outcome == 'success' || steps.market_refresh.outcome == 'success' || steps.hardware_refresh.outcome == 'success'
         run: |
@@ -72,7 +76,7 @@ jobs:
       - name: Prepare public files
         run: |
           mkdir -p _site/data
-          cp index.html style.css app.js share.js live-data.js market.html market.css market.js hardware.html hardware.css hardware.js _site/
+          cp index.html style.css app.js share.js live-data.js market.html market.css market.js hardware.html hardware.css hardware.js hardware-metrics.js _site/
           cp data/stocks.json data/market.json data/hardware.json data/hardware-universe.json _site/data/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

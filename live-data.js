@@ -121,16 +121,20 @@
   async function sectors(asOf){
     const get=async page=>{const d=(await request('https://push2.eastmoney.com/api/qt/clist/get',{pn:page,pz:100,np:1,fltt:2,fid:'f109',po:1,fs:'m:90+t:2',fields:'f12,f14,f3,f109,f124'})).data;if(!d?.diff)throw Error('板块行情暂不可用');return {...d,diff:Array.isArray(d.diff)?d.diff:Object.values(d.diff)}};
     const first=await get(1),rest=await pool(Array.from({length:Math.ceil(first.total/100)-1},(_,i)=>i+2),get),rows=[...first.diff,...rest.flatMap(x=>x.diff)];if(new Set(rows.map(r=>r.f12)).size!==first.total)throw Error('板块分页不完整');
-    const top=rows.filter(r=>n(r.f109)!=null).sort((a,b)=>b.f109-a.f109).slice(0,15),items=await pool(top,async r=>{const bars=(await kline('90.'+r.f12,8)).filter(b=>b.date<=asOf);if(bars.length<6||bars.at(-1).date!==asOf)throw Error('板块历史日期不匹配');const value=(bars.at(-1).close/bars.at(-6).close-1)*100;if(Math.abs(value-r.f109)>.08)throw Error('板块五日涨幅核验不符');return {code:r.f12,name:r.f14,change:n(r.f3),fiveDayChange:fixed(value),startDate:bars.at(-6).date,endDate:bars.at(-1).date}});
-    return {items,universe:first.total,scope:'东方财富全部行业层级，存在成分重叠；最近5个交易日涨幅，已用日K核对前15。'};
+    const history=new Map();const getBars=code=>{if(!history.has(code))history.set(code,kline('90.'+code,8));return history.get(code)};
+    const top=rows.filter(r=>n(r.f109)!=null).sort((a,b)=>b.f109-a.f109).slice(0,15),daily=rows.filter(r=>n(r.f3)!=null).sort((a,b)=>b.f3-a.f3).slice(0,15);
+    const verify=async(r,period)=>{const bars=(await getBars(r.f12)).filter(b=>b.date<=asOf);if(bars.length<period+1||bars.at(-1).date!==asOf)throw Error('板块历史日期不匹配');const value=(bars.at(-1).close/bars.at(-period-1).close-1)*100,reference=period===1?r.f3:r.f109;if(Math.abs(value-reference)>.08)throw Error('板块涨幅核验不符');return {code:r.f12,name:r.f14,change:period===1?fixed(value):n(r.f3),fiveDayChange:period===5?fixed(value):null,startDate:bars.at(-period-1).date,endDate:bars.at(-1).date}};
+    const [items,todayItems]=await Promise.all([pool(top,r=>verify(r,5)),pool(daily,r=>verify(r,1))]);
+    return {items,todayItems,universe:first.total,scope:'东方财富全部行业层级，存在成分重叠；当日与最近5个交易日榜各取前15，均已用日K核对。'};
   }
+
   async function refreshMarket(seed,progress){
     progress?.('正在获取指数和市场广度…');
     const [all,histories,sh,sz]=await Promise.all([quotes(progress),pool(INDEX,async item=>({item,bars:await kline(item[0],3)})),kline('1.000001',20),kline('0.399001',20)]);
     const asOf=sh.at(-1).date;if(sz.at(-1).date!==asOf)throw Error('沪深量能日期不匹配');
     const indices=histories.map(({item,bars})=>{const r=bars.filter(b=>b.date<=asOf).at(-1);if(r?.date!==asOf)throw Error('指数日期不匹配');return {code:item[0].split('.')[1],name:item[1],...r}});
     const changes=all.filter(q=>n(q.f2)>0&&n(q.f3)!=null&&day((n(q.f124)||0)*1000)===asOf).map(q=>q.f3);if(changes.length<4500)throw Error('同日广度行情覆盖不足');const up=changes.filter(v=>v>0).length,down=changes.filter(v=>v<0).length,breadth={up,down,flat:changes.length-up-down,total:changes.length,universe:all.length,advanceShare:up+down?up/(up+down):null};
-    progress?.('正在核对涨跌停和行业五日涨幅…');const [l,s]=await Promise.all([limits(asOf),sectors(asOf)]),days=sh.filter(r=>r.date<=asOf&&sz.some(b=>b.date===r.date)).slice(-10).map(r=>({date:r.date,shanghai:r.amount,shenzhen:sz.find(b=>b.date===r.date).amount,amount:r.amount+sz.find(b=>b.date===r.date).amount}));if(days.length!==10)throw Error('成交额窗口不足10个交易日');
+    progress?.('正在核对涨跌停和行业当日、五日涨幅…');const [l,s]=await Promise.all([limits(asOf),sectors(asOf)]),days=sh.filter(r=>r.date<=asOf&&sz.some(b=>b.date===r.date)).slice(-10).map(r=>({date:r.date,shanghai:r.amount,shenzhen:sz.find(b=>b.date===r.date).amount,amount:r.amount+sz.find(b=>b.date===r.date).amount}));if(days.length!==10)throw Error('成交额窗口不足10个交易日');
     const recent=sum(days.slice(-5).map(r=>r.amount)),previous=sum(days.slice(0,5).map(r=>r.amount)),turnover={days,today:days.at(-1).amount,dayChangePct:(days.at(-1).amount/days.at(-2).amount-1)*100,fiveDayChangePct:(recent/previous-1)*100,recentFiveDayAverage:recent/5,previousFiveDayAverage:previous/5,scope:'沪深主指数成交额合计，不含北交所；盘中为截至抓取时的累计成交额，不能与完整交易日直接比较。'};
     const main=indices.filter(r=>['000001','399001'].includes(r.code)),score=breadth.advanceShare==null||!l.up&&!l.down?null:Math.round(100*(.6*breadth.advanceShare+.25*l.up/(l.up+l.down)+.15*Math.max(0,Math.min(1,.5+avg(main.map(r=>r.change))/6))));
     const label=score==null?'待判断':score>=75?'活跃':score>=55?'偏强':score>=45?'分歧':score>=25?'偏弱':'低迷',hour=Number(new Date().toLocaleTimeString('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',hour12:false}));
@@ -149,6 +153,21 @@
     if(!stocks.some(s=>s.available))throw Error('未取得有效A股行情，请核对代码或稍后重试');
     return {updatedAt:new Date().toISOString(),source:'东方财富浏览器直连行情与公司资料',stocks,warnings,live:true};
   }
+  async function hardwareOrders(stock){
+    const announcement=async(url,params)=>{const target=new URL(url);Object.entries(params).forEach(([k,v])=>target.searchParams.set(k,v));const response=await fetch(target,{signal:AbortSignal.timeout(18000)});if(!response.ok)throw Error('公告服务响应 '+response.status);return response.json()};
+    const d=await announcement('https://np-anotice-stock.eastmoney.com/api/security/ann',{sr:-1,page_size:60,page_index:1,ann_type:'A',client_source:'web',stock_list:stock.code,f_node:0,s_node:0});
+    if(!d.success||!Array.isArray(d.data?.list))throw Error('公告接口暂不可用');
+    const cutoff=ago(day(Date.now()),180),all=d.data.list.filter(r=>r.notice_date?.slice(0,10)>=cutoff),candidates=all.filter(r=>/重大合同|销售合同|经营合同|中标|订单|投资者关系活动|调研/.test(r.title)).slice(0,3),items=[];
+    for(const row of candidates){try{const body=(await announcement('https://np-cnotice-stock.eastmoney.com/api/content/ann',{art_code:row.art_code,client_source:'web',page_index:1})).data;if(!body?.notice_content)continue;const excerpt=window.HardwareMetrics.orderExcerpt(body.notice_content);if(excerpt)items.push({title:row.title,date:row.notice_date.slice(0,10),excerpt,kind:/重大合同|销售合同|经营合同|中标/.test(row.title)?'合同类公告':'交流记录',url:'https://data.eastmoney.com/notices/detail/'+stock.code+'/'+row.art_code+'.html'});if(items.length>=2)break}catch{}}
+    return {status:items.length?'found':'not-found',items,checkedAt:new Date().toISOString(),searched:all.length,scope:'最近180天内、最新60条公告，最多核对3份合同或交流记录；不代表已穷尽所有订单披露。',summary:items.length?(items.some(i=>i.kind==='合同类公告')?'发现合同类披露':'发现定性订单描述'):'本次检索未找到可引用订单描述'};
+  }
+  async function enrichHardwareLeaders(stocks,progress){
+    const ranks=window.HardwareMetrics.leaders(stocks),selected=stocks.filter(s=>ranks.has(s.code));if(!selected.length)return stocks;let done=0;
+    const asOf=day(Date.now()),codes=selected.map(s=>'"'+s.code+'"').join(','),[latest,previous]=quarters(asOf),known=`(NOTICE_DATE<='${asOf} 23:59:59')(REPORT_DATE<='${asOf}')(SECURITY_TYPE_CODE="058001001")`,fields='SECURITY_CODE,INDUSTRY_NAME,REPORT_DATE,NOTICE_DATE,TOTAL_OPERATE_INCOME,OPERATE_INCOME,PARENT_NETPROFIT,DEDUCT_PARENT_NETPROFIT,TOI_RATIO,PARENT_NETPROFIT_RATIO,DPN_RATIO';
+    const earnings=(async()=>{const [income,cash]=await Promise.all([report('RPT_DMSK_FN_INCOME',`(SECURITY_CODE in (${codes}))(REPORT_DATE>='${ago(previous,370)}')`+known,fields),report('RPT_DMSK_FN_CASHFLOW',`(SECURITY_CODE in (${codes}))(REPORT_DATE>='${previous}')`+known,'SECURITY_CODE,REPORT_DATE,NETCASH_OPERATE')]);for(const s of selected){const rows=income.filter(r=>r.SECURITY_CODE===s.code).sort((a,b)=>b.REPORT_DATE.localeCompare(a.REPORT_DATE));if(!rows.length){s.fundamentals={status:'unavailable',label:'待更新'};continue}const row=rows[0],period=row.REPORT_DATE.slice(0,10),prior=rows.find(r=>r.REPORT_DATE.slice(0,10)===String(Number(period.slice(0,4))-1)+period.slice(4));s.fundamentals={...company(row,prior,cash.find(r=>r.SECURITY_CODE===s.code&&r.REPORT_DATE.slice(0,10)===period)),checkedAt:asOf,source:'https://data.eastmoney.com/bbsj/'+s.code+'.html'}}})().catch(()=>{for(const s of selected)s.fundamentals={status:'unavailable',label:'待更新'}});
+    await Promise.all([earnings,pool(selected,async s=>{s.leaderRank=ranks.get(s.code);const date=s.quoteTime?day(s.quoteTime*1000):asOf;try{const raw=(await request('https://push2his.eastmoney.com/api/qt/stock/kline/get',{secid:(s.code.startsWith('6')?'1.':'0.')+s.code,klt:101,fqt:1,lmt:100000,end:20500101,fields1:'f1,f2,f3,f4,f5,f6',fields2:'f51,f52,f53,f54,f55,f56,f57'})).data;s.history=window.HardwareMetrics.historicalHigh(raw,s.price,date)}catch{s.history={status:'unavailable'}}try{s.orders=await hardwareOrders(s)}catch(error){s.orders=s.orders?.checkedAt?{...s.orders,cached:true}:{status:'unavailable',summary:'订单公告暂不可用',items:[]}}progress?.('龙头高点、业绩与订单核验 '+(++done)+'/'+selected.length);},3)]);
+    return stocks;
+  }
   const cache={get(key){try{const v=JSON.parse(localStorage.getItem('radar-live-'+key));return v?.version===1?v.data:null}catch{return null}},put(key,data){try{localStorage.setItem('radar-live-'+key,JSON.stringify({version:1,data}))}catch{}}};
-  window.RadarLive={refreshStocks,refreshMarket,refreshHardware,cache};
+  window.RadarLive={refreshStocks,refreshMarket,refreshHardware,enrichHardwareLeaders,cache};
 })();
