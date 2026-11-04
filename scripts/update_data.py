@@ -23,6 +23,35 @@ def number(v):
         return n if math.isfinite(n) else None
     except (ValueError,TypeError): return None
 
+def enrich_ownership(stocks):
+    codes=','.join('"'+s['code']+'"' for s in stocks)
+    result=fetch('https://datacenter.eastmoney.com/securities/api/data/v1/get',dict(reportName='RPT_F10_ORG_BASICINFO',columns='SECURITY_CODE,ORG_FORM,REAL_CONTROLER,CONTROL_HOLDER',filter=f'(SECURITY_CODE in ({codes}))',pageSize=500))
+    if not result.get('success') or not result.get('result'): raise RuntimeError(str(result))
+    by_code={r['SECURITY_CODE']:r for r in result['result']['data']}
+    for s in stocks:
+        r=by_code.get(s['code'],{}); nature=r.get('ORG_FORM') or '待核实'; controller=r.get('REAL_CONTROLER') or '未披露'; holder=r.get('CONTROL_HOLDER') or '未披露'
+        category='待核实'
+        if '中央金融' in nature: category='中央金融国企'
+        elif '中央国有' in nature or '央企' in nature: category='央企'
+        elif '地方国有' in nature: category='地方国企'
+        elif '国有' in nature: category='国资企业'
+        elif any(w in controller for w in ['国有资产监督管理','人民政府','财政部','财政厅','财政局']): category='国资背景'
+        s['ownership']=dict(category=category,nature=nature,controller=controller,holder=holder,checkedAt=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(),source=f'https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/Index?type=web&code={"SH" if s["market"]=="沪市" else "BJ" if s["market"]=="北交所" else "SZ"}{s["code"]}')
+    unknown=[s for s in stocks if s['ownership']['category']=='待核实']
+    if unknown:
+        try:
+            codes=','.join('"'+s['code']+'"' for s in unknown)
+            holders=fetch('https://datacenter.eastmoney.com/securities/api/data/v1/get',dict(reportName='RPT_F10_EH_HOLDERS',columns='SECURITY_CODE,END_DATE,HOLDER_NAME,HOLD_NUM_RATIO,HOLDER_RANK',filter=f'(SECURITY_CODE in ({codes}))',pageSize=500,sortColumns='END_DATE,HOLDER_RANK',sortTypes='-1,1'))['result']['data']
+            for s in unknown:
+                rows=[r for r in holders if r['SECURITY_CODE']==s['code']]
+                if not rows: continue
+                latest=max(r['END_DATE'] for r in rows)
+                matches=[r for r in rows if r['END_DATE']==latest and any(w in r['HOLDER_NAME'] for w in ['中央汇金','中国证券金融','国有资产监督管理','财政厅','财政局','珠海格力集团','珠海格力金融投资','中国国新控股','中国诚通控股'])]
+                if matches:
+                    s['ownership'].update(category='国资参股',shareholderEvidence=[dict(name=r['HOLDER_NAME'],ratio=r['HOLD_NUM_RATIO'],date=r['END_DATE'][:10]) for r in matches])
+        except Exception as e: print(f'Minority shareholder verification unavailable: {e}')
+    return stocks
+
 def get_quotes():
     quotes={}; page=1
     while True:
@@ -92,6 +121,13 @@ def main():
         stocks.append(dict(code=code,name=q['f14'],market='沪市' if q['f13']==1 else ('北交所' if code[0] in '489' else '深市'),price=price,change=number(q['f3']),yieldRate=round(y,4),cash=round(cash,6),pe=number(q['f115']),pb=number(q['f23']),cap=number(q['f20']),quoteTime=q.get('f124'),dividends=records))
     stocks.sort(key=lambda x:x['yieldRate'],reverse=True)
     if not stocks: raise RuntimeError('筛选结果异常为空')
+    try: enrich_ownership(stocks)
+    except Exception as e:
+        print(f'Ownership refresh unavailable: {e}')
+        old=ROOT/'data/stocks.json'
+        previous={s['code']:s.get('ownership') for s in json.loads(old.read_text(encoding='utf-8'))['stocks']} if old.exists() else {}
+        for s in stocks:
+            if previous.get(s['code']): s['ownership']=previous[s['code']]
     payload=dict(updatedAt=now.isoformat(),windowStart=str(start),windowEnd=str(today),quoteAt=max(q.get('f124') or 0 for q in quotes.values()),universe=len(quotes),dividendRecords=total,source='东方财富行情 / 分红送配',method='过去365天已除息税前每股现金分红之和 ÷ 最新价 × 100%；未对期间送转、配股、拆并股调整，特殊公司须复核。',stocks=stocks)
     target=ROOT/'data/stocks.json'; temp=target.with_suffix('.tmp');temp.write_text(json.dumps(payload,ensure_ascii=False,separators=(',',':')),encoding='utf-8');temp.replace(target)
     print(f'Updated {len(stocks)} stocks / {len(quotes)} universe; {total} dividend records')
