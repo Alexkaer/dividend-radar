@@ -29,6 +29,7 @@ jobs:
           python scripts/test_technicals.py
           python scripts/test_fundamentals.py
       - name: Refresh complete market data
+        if: github.event_name != 'push'
         id: refresh
         continue-on-error: true
         run: python scripts/update_data.py
