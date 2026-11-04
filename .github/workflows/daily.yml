@@ -25,7 +25,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Validate indicator calculations
-        run: python scripts/test_technicals.py
+        run: |
+          python scripts/test_technicals.py
+          python scripts/test_fundamentals.py
       - name: Refresh complete market data
         id: refresh
         continue-on-error: true

@@ -5,8 +5,10 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 try:
     from .technicals import enrich_technicals
+    from .fundamentals import enrich_fundamentals
 except ImportError:
     from technicals import enrich_technicals
+    from fundamentals import enrich_fundamentals
 
 ROOT = Path(__file__).resolve().parents[1]
 def fetch(url, params):
@@ -133,6 +135,10 @@ def main():
         for s in stocks:
             if previous.get(s['code']): s['ownership']=previous[s['code']]
     enrich_technicals(stocks, str(today))
+    try: enrich_fundamentals(stocks, now.date().isoformat(), fetch)
+    except Exception as e:
+        print(f'Financial refresh unavailable: {e}')
+        for stock in stocks: stock['fundamentals']=dict(status='unavailable',label='待更新',industry='待更新')
     payload=dict(updatedAt=now.isoformat(),windowStart=str(start),windowEnd=str(today),quoteAt=max(q.get('f124') or 0 for q in quotes.values()),universe=len(quotes),dividendRecords=total,source='东方财富行情 / 分红送配；腾讯证券历史K线',method='过去365天已除息税前每股现金分红之和 ÷ 最新价 × 100%；未对期间送转、配股、拆并股调整，特殊公司须复核。',stocks=stocks)
     target=ROOT/'data/stocks.json'; temp=target.with_suffix('.tmp');temp.write_text(json.dumps(payload,ensure_ascii=False,separators=(',',':')),encoding='utf-8');temp.replace(target)
     print(f'Updated {len(stocks)} stocks / {len(quotes)} universe; {total} dividend records')
