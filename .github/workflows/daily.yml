@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Validate indicator calculations
+        run: python scripts/test_technicals.py
       - name: Refresh complete market data
         id: refresh
         continue-on-error: true

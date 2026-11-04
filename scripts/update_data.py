@@ -3,6 +3,10 @@ import json, math, os, time, urllib.request, urllib.parse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
+try:
+    from .technicals import enrich_technicals
+except ImportError:
+    from technicals import enrich_technicals
 
 ROOT = Path(__file__).resolve().parents[1]
 def fetch(url, params):
@@ -128,7 +132,8 @@ def main():
         previous={s['code']:s.get('ownership') for s in json.loads(old.read_text(encoding='utf-8'))['stocks']} if old.exists() else {}
         for s in stocks:
             if previous.get(s['code']): s['ownership']=previous[s['code']]
-    payload=dict(updatedAt=now.isoformat(),windowStart=str(start),windowEnd=str(today),quoteAt=max(q.get('f124') or 0 for q in quotes.values()),universe=len(quotes),dividendRecords=total,source='东方财富行情 / 分红送配',method='过去365天已除息税前每股现金分红之和 ÷ 最新价 × 100%；未对期间送转、配股、拆并股调整，特殊公司须复核。',stocks=stocks)
+    enrich_technicals(stocks, str(today))
+    payload=dict(updatedAt=now.isoformat(),windowStart=str(start),windowEnd=str(today),quoteAt=max(q.get('f124') or 0 for q in quotes.values()),universe=len(quotes),dividendRecords=total,source='东方财富行情 / 分红送配；腾讯证券历史K线',method='过去365天已除息税前每股现金分红之和 ÷ 最新价 × 100%；未对期间送转、配股、拆并股调整，特殊公司须复核。',stocks=stocks)
     target=ROOT/'data/stocks.json'; temp=target.with_suffix('.tmp');temp.write_text(json.dumps(payload,ensure_ascii=False,separators=(',',':')),encoding='utf-8');temp.replace(target)
     print(f'Updated {len(stocks)} stocks / {len(quotes)} universe; {total} dividend records')
 if __name__=='__main__': main()
