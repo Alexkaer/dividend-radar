@@ -11,11 +11,11 @@
   }
   function render(d){
     if(!d.indices?.length||d.turnover?.days?.length!==10||d.sectors?.items?.length!==15)throw Error('快照不完整');
-    $('marketDate').textContent=d.asOf;
+    $('marketAlert').textContent='';$('marketDate').textContent=d.asOf;$('marketDate').previousElementSibling.textContent='行情日期 / '+(d.session||'行情快照');
     $('marketState').textContent='快照生成 '+new Date(d.updatedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
     const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'});
     if(d.asOf!==today)$('marketAlert').textContent='当前展示 '+d.asOf+' 的收盘快照，可能因休市或更新延迟。请核对日期。';
-    $('indices').innerHTML=d.indices.map(r=>`<article><div><span>${esc(r.name)}</span><small>${esc(r.code)}</small></div><b>${fmt(r.close)}</b><strong class="${tone(r.change)}">${pct(r.change)}</strong><small>收盘 · ${esc(r.date)}</small></article>`).join('');
+    $('indices').innerHTML=d.indices.map(r=>`<article><div><span>${esc(r.name)}</span><small>${esc(r.code)}</small></div><b>${fmt(r.close)}</b><strong class="${tone(r.change)}">${pct(r.change)}</strong><small>${esc(d.session||'行情快照')} · ${esc(r.date)}</small></article>`).join('');
     const b=d.breadth,m=d.sentiment,l=d.limits;
     $('moodScore').textContent=m.score??'—';$('moodLabel').textContent=m.label;
     $('moodDial').style.setProperty('--score',Math.max(0,Math.min(100,m.score||0))+'%');
@@ -25,8 +25,8 @@
     $('breadthNumbers').innerHTML=[['上涨',b.up,'up'],['下跌',b.down,'down'],['平盘 / 停牌',b.flat,'muted']].map(([label,n,cls])=>`<div><small>${label}</small><b class="${cls}">${fmt(n,0)}</b></div>`).join('');
     $('breadthBar').innerHTML=[['#ff869b',b.up],['#7dfbd3',b.down],['#566c78',b.flat]].map(([c,n])=>`<span style="background:${c};width:${n/b.total*100}%"></span>`).join('');
     $('limitUp').textContent=fmt(l.up,0);$('limitDown').textContent=fmt(l.down,0);$('advanceShare').textContent=b.advanceShare==null?'—':fmt(b.advanceShare*100,1)+'%';$('limitScope').textContent=l.scope;
-    const v=d.turnover;
-    $('volumeMetrics').innerHTML=[['今日成交额',fmt(v.today/1e12)+' 万亿',''],['较昨日',pct(v.dayChangePct),tone(v.dayChangePct)],['近5日较此前5日',pct(v.fiveDayChangePct),tone(v.fiveDayChangePct)],['最近5日日均',fmt(v.recentFiveDayAverage/1e12)+' 万亿','']].map(([label,value,cls])=>`<div><small>${label}</small><b class="${cls}">${value}</b></div>`).join('');
+    const v=d.turnover,intraday=d.session==='盘中快照';
+    $('volumeMetrics').innerHTML=[[intraday?'当前累计成交额':'今日成交额',fmt(v.today/1e12)+' 万亿',''],[intraday?'当前累计较昨全日':'较昨日',pct(v.dayChangePct),tone(v.dayChangePct)],[intraday?'近5日比较（含盘中）':'近5日较此前5日',pct(v.fiveDayChangePct),tone(v.fiveDayChangePct)],['最近5日日均',fmt(v.recentFiveDayAverage/1e12)+' 万亿','']].map(([label,value,cls])=>`<div><small>${label}</small><b class="${cls}">${value}</b></div>`).join('');
     $('volumeChart').innerHTML=volumeSVG(v.days);$('volumeScope').textContent=v.scope;
     $('volumeRows').innerHTML=v.days.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.shanghai/1e8)}</td><td>${fmt(r.shenzhen/1e8)}</td><td>${fmt(r.amount/1e8)}</td></tr>`).join('');
     const items=d.sectors.items,max=Math.max(...items.map(r=>Math.abs(r.fiveDayChange)),1);
@@ -34,5 +34,11 @@
     $('sectorList').innerHTML=items.map((r,i)=>`<a class="sector-row" href="https://quote.eastmoney.com/bk/90.${esc(r.code)}.html" target="_blank" rel="noopener"><span class="rank">${String(i+1).padStart(2,'0')}</span><div class="sector-name"><b>${esc(r.name)}</b><small>${esc(r.code)}</small></div><div class="sector-track"><i style="width:${Math.abs(r.fiveDayChange)/max*100}%"></i></div><b class="${tone(r.fiveDayChange)}">${pct(r.fiveDayChange)}</b><small>今日 <span class="${tone(r.change)}">${pct(r.change)}</span></small><span class="sector-arrow">↗</span></a>`).join('');
     $('sectorScope').textContent=d.sectors.scope+' 共比较 '+d.sectors.universe+' 个板块指数。';
   }
-  fetch('./data/market.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('HTTP '+r.status);return r.json()}).then(render).catch(error=>{$('marketState').textContent='数据暂不可用';$('marketAlert').textContent='未能载入有效大盘快照，请稍后刷新或查看 GitHub 更新任务。';console.error(error)});
+  let current=null,busy=false;
+  async function refresh(){if(busy)return;busy=true;$('refreshMarket').disabled=true;$('refreshMarket').textContent='↻ 正在刷新…';
+    try{const d=await window.RadarLive.refreshMarket(current,message=>{$('marketState').textContent=message});render(d);current=d;window.RadarLive.cache.put('market',d)}
+    catch(error){$('marketState').textContent='刷新失败 · 保留上次数据';$('marketAlert').textContent=error.message+'。当前仍为上次有效快照，可点击刷新重试。';}
+    finally{busy=false;$('refreshMarket').disabled=false;$('refreshMarket').textContent='↻ 刷新数据';}}
+  $('refreshMarket').onclick=refresh;
+  (async()=>{let cached=window.RadarLive.cache.get('market');if(cached){try{render(cached);current=cached}catch{cached=null}}if(!cached){try{const r=await fetch('./data/market.json',{cache:'no-store'});if(!r.ok)throw Error();const d=await r.json();render(d);current=d}catch{}}refresh()})();
 })();

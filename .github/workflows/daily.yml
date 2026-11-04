@@ -1,9 +1,7 @@
-name: Update dividend radar and deploy
+name: Validate and deploy dividend radar
 on:
   push:
     branches: [main]
-  schedule:
-    - cron: '30 7 * * *'
   workflow_dispatch:
 permissions:
   contents: write
@@ -21,6 +19,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -60,7 +60,7 @@ jobs:
       - name: Prepare public files
         run: |
           mkdir -p _site/data
-          cp index.html style.css app.js share.js market.html market.css market.js _site/
+          cp index.html style.css app.js share.js live-data.js market.html market.css market.js _site/
           cp data/stocks.json data/market.json _site/data/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
