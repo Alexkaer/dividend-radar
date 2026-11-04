@@ -41,7 +41,9 @@ def calculate(bars, as_of):
 
 def history(stock, as_of):
     symbol = ('sh' if stock['market'] == '沪市' else 'bj' if stock['market'] == '北交所' else 'sz') + stock['code']
-    query = urllib.parse.urlencode({'param': f'{symbol},day,,{as_of},320,qfq'})
+    # Explicit end dates can return yesterday's cached bar after the close.
+    # Fetch the latest series and let calculate() enforce the snapshot cutoff.
+    query = urllib.parse.urlencode({'param': f'{symbol},day,,,320,qfq'})
     errors = []
     for base in ['https://web.ifzq.gtimg.cn/appstock/app/fqkline/get', 'https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get']:
         try:
