@@ -17,11 +17,23 @@ QUERIES = {
 }
 
 
+class QuotaExceeded(RuntimeError):
+    pass
+
+
+def check_quota(value):
+    message=str(value.get('message') or value.get('msg') or '') if isinstance(value,dict) else ''
+    if ('额度' in message or '数据量' in message) and ('上限' in message or '用尽' in message or '耗尽' in message):
+        raise QuotaExceeded('MX daily data quota exhausted; previous encrypted snapshot retained. Quota resets next day.')
+
+
 def api(endpoint, query, day):
     CACHE.mkdir(parents=True, exist_ok=True)
     cache = CACHE / (hashlib.sha256((day + endpoint + query).encode()).hexdigest() + '.json')
     if cache.exists():
-        return json.loads(cache.read_text(encoding='utf-8'))
+        value=json.loads(cache.read_text(encoding='utf-8'))
+        check_quota(value)
+        return value
     for attempt in range(5):
         time.sleep(2 + attempt * 5)
         try:
@@ -30,14 +42,19 @@ def api(endpoint, query, day):
                 data=json.dumps(body).encode(), headers={'apikey': os.environ['MX_APIKEY'], 'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=180) as response:
                 result = json.load(response)
+            check_quota(result)
             if result.get('status') not in (0, '0'):
                 raise ValueError('MX outer response failed')
             data = result.get('data') or {}
+            check_quota(data)
             if data.get('status', 0) not in (0, '0') or data.get('code', 0) not in (0, '0', 200, '200') or not data.get('data'):
                 raise ValueError('MX nested response failed')
             value = data['data']
+            check_quota(value)
             cache.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
             return value
+        except QuotaExceeded:
+            raise
         except Exception:
             if attempt == 4:
                 raise RuntimeError('MX request failed after retries; retaining previous encrypted snapshot') from None
@@ -199,9 +216,16 @@ def main():
     if (now.hour,now.minute) < (15,15):
         print('Daily closing bars are not complete; previous snapshot retained.')
         return
-    index=api('query','上证指数最近5个交易日每日收盘价，返回交易日期',today)
-    dates=[str(d)[:10] for b in tables(index) for d in (b.get('rawTable') or {}).get('headName',[]) if str(d)[:10]<=today]
-    if not dates: raise RuntimeError('No market session date')
+    dates=[]
+    for date_query in ('上证指数最近5个交易日每日收盘价，返回交易日期',
+                       '上证指数000001.SH最近10个交易日每日收盘价和成交额，返回每个交易日期',
+                       '600000浦发银行最近5个交易日每日前复权收盘价，返回交易日期'):
+        index=api('query',date_query,today)
+        dates=[str(d)[:10] for b in tables(index) for d in (b.get('rawTable') or {}).get('headName',[])
+               if __import__('re').fullmatch(r'\d{4}-\d{2}-\d{2}',str(d)[:10]) and str(d)[:10]<=today]
+        if dates: break
+        print('MX date query returned no historical date table; trying explicit security query.',flush=True)
+    if not dates: raise RuntimeError('No validated market session date; retaining original snapshot')
     session=max(dates)
     if session != today:
         print('No current trading session; previous snapshot retained.')
@@ -219,18 +243,22 @@ def main():
     codes=sorted(universe); failures=[]; verified=0
     for start in range(0,len(codes),5):
         batch=codes[start:start+5]
-        query='、'.join(c+str(universe[c]) for c in batch)+'分别最近60个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回每只股票代码和交易日期'
+        query='、'.join(c+str(universe[c]) for c in batch)+'分别最近40个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回每只股票代码和交易日期'
         try:
             blocks=tables(api('query',query,today))
+        except QuotaExceeded:
+            raise
         except RuntimeError:
             blocks=[]
         for code in batch:
             bars=bars_from_tables(blocks,code)
             if len(bars)<35 or not bars or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]):
                 # MX occasionally omits an entity in multi-stock queries; retry it alone.
-                single=code+str(universe[code])+'最近60个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回交易日期'
+                single=code+str(universe[code])+'最近40个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回交易日期'
                 try:
                     bars=bars_from_tables(tables(api('query',single,today)),code)
+                except QuotaExceeded:
+                    raise
                 except RuntimeError:
                     bars=[]
             if len(bars)<35 or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]) or 'amount' not in bars[-1]:

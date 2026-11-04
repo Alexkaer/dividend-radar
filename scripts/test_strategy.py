@@ -1,6 +1,6 @@
 import copy
 import unittest
-from strategy_screen import evaluate, bars_from_tables
+from strategy_screen import evaluate, bars_from_tables, check_quota, QuotaExceeded
 
 
 def history():
@@ -9,6 +9,10 @@ def history():
 
 
 class StrategyTests(unittest.TestCase):
+    def test_mx_quota_stops_instead_of_appearing_empty(self):
+        with self.assertRaises(QuotaExceeded):
+            check_quota({'message':'您今日请求的数据量已达到上限，额度将于次日恢复'})
+        check_quota({'message':'ok'})
     def test_same_day_triple_and_signal_day_observe(self):
         bars=history()
         bars[-1].update(open=10,close=10.5,high=10.6,low=10,volume=300,change=5-0.1)
