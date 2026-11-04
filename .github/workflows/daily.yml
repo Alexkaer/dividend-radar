@@ -29,6 +29,13 @@ jobs:
           python scripts/test_technicals.py
           python scripts/test_fundamentals.py
           python scripts/test_market.py
+      - name: Validate browser scripts
+        run: |
+          node --check app.js
+          node --check market.js
+          node --check live-data.js
+          node --check share.js
+          node --check hardware.js
       - name: Refresh complete market data
         if: github.event_name != 'push'
         id: refresh
@@ -49,19 +56,24 @@ jobs:
         run: |
           echo '::warning::Market refresh failed. Retaining original market snapshot date.'
           test -f data/market.json
+      - name: Refresh hardware fallback snapshot
+        if: github.event_name != 'push'
+        id: hardware_refresh
+        continue-on-error: true
+        run: python scripts/update_hardware.py
       - name: Commit successful snapshots
-        if: steps.refresh.outcome == 'success' || steps.market_refresh.outcome == 'success'
+        if: steps.refresh.outcome == 'success' || steps.market_refresh.outcome == 'success' || steps.hardware_refresh.outcome == 'success'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/stocks.json data/market.json
+          git add data/stocks.json data/market.json data/hardware.json
           git diff --cached --quiet || git commit -m 'data: refresh dividend snapshot'
           git push
       - name: Prepare public files
         run: |
           mkdir -p _site/data
-          cp index.html style.css app.js share.js live-data.js market.html market.css market.js _site/
-          cp data/stocks.json data/market.json _site/data/
+          cp index.html style.css app.js share.js live-data.js market.html market.css market.js hardware.html hardware.css hardware.js _site/
+          cp data/stocks.json data/market.json data/hardware.json data/hardware-universe.json _site/data/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -69,5 +81,5 @@ jobs:
       - uses: actions/deploy-pages@v4
         id: deployment
       - name: Report refresh failure
-        if: steps.refresh.outcome == 'failure' || steps.market_refresh.outcome == 'failure'
+        if: steps.refresh.outcome == 'failure' || steps.market_refresh.outcome == 'failure' || steps.hardware_refresh.outcome == 'failure'
         run: exit 1

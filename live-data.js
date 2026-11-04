@@ -136,6 +136,19 @@
     const label=score==null?'待判断':score>=75?'活跃':score>=55?'偏强':score>=45?'分歧':score>=25?'偏弱':'低迷',hour=Number(new Date().toLocaleTimeString('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',hour12:false}));
     return {updatedAt:new Date().toISOString(),asOf,session:asOf===day(Date.now())&&hour<15?'盘中快照':'收盘快照',indices,breadth,limits:l,sentiment:{label,score,method:seed?.sentiment?.method||'60%上涨占比+25%涨停池占比+15%指数强弱分；规则描述，不预测未来。'},turnover,sectors:s,source:'东方财富浏览器直连行情与历史K线',live:true};
   }
+  async function refreshHardware(definitions,progress){
+    if(!definitions.length)return {updatedAt:new Date().toISOString(),stocks:[],warnings:[]};
+    if(definitions.some(s=>!/^\d{6}$/.test(s.code)))throw Error('股票代码必须为6位数字');
+    progress?.('正在刷新硬件AI行情…');
+    const chunks=[];for(let i=0;i<definitions.length;i+=80)chunks.push(definitions.slice(i,i+80));
+    const batches=await pool(chunks,async list=>{const secids=list.map(s=>(s.code.startsWith('6')?'1.':'0.')+s.code).join(',');const d=(await request('https://push2.eastmoney.com/api/qt/ulist.np/get',{secids,fltt:2,fields:'f2,f3,f6,f8,f12,f13,f14,f20,f23,f115,f124'})).data;if(!d?.diff)throw Error('标的行情暂不可用');return Array.isArray(d.diff)?d.diff:Object.values(d.diff)});
+    const quotes=new Map(batches.flat().map(q=>[q.f12,q]));let profiles=[],warnings=[];
+    try{const d=await request('https://datacenter.eastmoney.com/securities/api/data/v1/get',{reportName:'RPT_F10_ORG_BASICINFO',columns:'SECURITY_CODE,SECURITY_NAME_ABBR,MAIN_BUSINESS,ORG_PROFILE,BOARD_NAME_1LEVEL,BOARD_NAME_2LEVEL',filter:`(SECURITY_CODE in (${definitions.map(s=>'"'+s.code+'"').join(',')}))`,pageSize:500},'callback');if(!d.result?.data)throw Error();profiles=d.result.data}catch{warnings.push('公司主营资料暂不可用')}
+    const byCode=new Map(profiles.map(p=>[p.SECURITY_CODE,p]));
+    const stocks=definitions.map(item=>{const q=quotes.get(item.code),p=byCode.get(item.code);return {...item,nameVerified:q?.f14||item.name||item.code,market:item.code.startsWith('6')?'沪市':/^[489]/.test(item.code)?'北交所':'深市',price:n(q?.f2),change:n(q?.f3),amount:n(q?.f6),turnover:n(q?.f8),cap:n(q?.f20),pe:n(q?.f115),pb:n(q?.f23),quoteTime:n(q?.f124),industry:p?.BOARD_NAME_2LEVEL||p?.BOARD_NAME_1LEVEL||null,business:p?.MAIN_BUSINESS||p?.ORG_PROFILE||null,source:'https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/Index?type=web&code='+(item.code.startsWith('6')?'SH':/^[489]/.test(item.code)?'BJ':'SZ')+item.code,companyVerified:Boolean(p),available:Boolean(q?.f14)&&n(q?.f2)>0}});
+    if(!stocks.some(s=>s.available))throw Error('未取得有效A股行情，请核对代码或稍后重试');
+    return {updatedAt:new Date().toISOString(),source:'东方财富浏览器直连行情与公司资料',stocks,warnings,live:true};
+  }
   const cache={get(key){try{const v=JSON.parse(localStorage.getItem('radar-live-'+key));return v?.version===1?v.data:null}catch{return null}},put(key,data){try{localStorage.setItem('radar-live-'+key,JSON.stringify({version:1,data}))}catch{}}};
-  window.RadarLive={refreshStocks,refreshMarket,cache};
+  window.RadarLive={refreshStocks,refreshMarket,refreshHardware,cache};
 })();
