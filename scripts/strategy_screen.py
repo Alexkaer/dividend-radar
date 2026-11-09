@@ -319,7 +319,9 @@ def main():
             for kind,item in result.items():
                 if kind in membership[code]:
                     if mode=='auction': item.update(status='竞价观察 · 昨日收复，今日待确认',provisional=True)
-                    elif mode=='intraday': item.update(status='盘中临时 · '+item['status'],provisional=True)
+                    elif mode=='intraday':
+                        item.update(status='盘中临时 · '+item['status'],provisional=True,volumeRatio=None)
+                        item['confirmation']+='；盘中累计量不直接当作全天缩量'
                     item['evaluatedAt']=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
                     groups[kind].append(dict(code=code,name=universe[code],**item))
         print('K-line progress:',min(start+5,len(codes)),'/',len(codes),flush=True)
