@@ -10,9 +10,9 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = Path(tempfile.gettempdir()) / 'dividend-strategy-private-cache'
-PULLBACK_RULE_VERSION = '2026-11-09-ma-reclaim-v2'
+PULLBACK_RULE_VERSION = '2026-11-09-mainboard-bullish-v3'
 QUERIES = {
-    'pullback': 'A股，非ST，上市天数大于365天，最近20个交易日内涨停次数大于等于2次且小于等于3次，今日成交额大于1亿元',
+    'pullback': '沪深主板A股，非ST，非创业板，非科创板，非北交所，上市天数大于365天，最近20个交易日内涨停次数大于等于2次',
     'second': 'A股，非ST，上市天数大于365天，最近30个交易日内连续涨停天数大于等于2天，今日涨跌幅小于5%，今日成交额大于1亿元',
     'triple': 'A股，非ST，上市天数大于365天，最近5个交易日内成交量环比增长率大于等于200%出现次数大于0，最近5个交易日内当日涨幅大于3%出现次数大于0，今日成交额大于1亿元',
 }
@@ -130,12 +130,30 @@ def bars_from_tables(blocks, code):
     return [dict(date=d, **row) for d, row in sorted(series.items()) if all(k in row for k in ('open','high','low','close','volume','change'))]
 
 
+def pullback_security_allowed(code, name):
+    import re
+    import unicodedata
+    normalized=unicodedata.normalize('NFKC',str(name)).upper()
+    return bool(normalized.strip()) and bool(re.fullmatch(r'(?:60|00)\d{4}',str(code))) and not re.search(r'ST|退',normalized)
+
+
+def bullish_averages(bars):
+    if len(bars)<21: return None
+    current={n:sum(b['close'] for b in bars[-n:])/n for n in (5,10,20)}
+    previous={n:sum(b['close'] for b in bars[-n-1:-1])/n for n in (5,10,20)}
+    if not current[5]>current[10]>current[20]: return None
+    if not all(current[n]>previous[n] for n in current): return None
+    return dict(current=current,previous=previous)
+
+
 def reclaim_match(bars):
-    """2–3 official limit-ups in 20 sessions, then a strict MA5/MA10 reclaim."""
+    """At least two official limit-ups, bullish MA5/10/20, a fresh upward cross."""
     if len(bars)<21 or any(b.get('limit') not in (0,1) for b in bars[-20:]):
         return None
     count=sum(b['limit']==1 for b in bars[-20:])
-    if count not in (2,3): return None
+    if count<2: return None
+    trend=bullish_averages(bars)
+    if not trend: return None
     last,previous=bars[-1],bars[-2]
     lines=[]
     for period in (5,10):
@@ -148,7 +166,7 @@ def reclaim_match(bars):
         if last['close']>ma and (was_below or dipped_today):
             lines.append(dict(period=period,ma=ma,previousMA=prior_ma,previousClose=previous['close'],
                 priorBelow=was_below,intradayBelow=dipped_today))
-    return dict(count=count,lines=lines) if lines else None
+    return dict(count=count,lines=lines,trend=trend) if lines else None
 
 
 def evaluate(bars):
@@ -157,8 +175,6 @@ def evaluate(bars):
     if len(bars) < 35:
         return found
     last = bars[-1]
-    if last.get('amount', 0) <= 1e8:
-        return found
     def intact(low, start):
         return min(b['low'] for b in bars[start:]) >= low - .005
     def record(kind, event, low, zone, status, evidence):
@@ -167,6 +183,20 @@ def evaluate(bars):
             volumeRatio=round(last['volume']/event['volume'],4) if event['volume']>0 else None,
             confirmation='分时VWAP、板块强度与指定时段承接未查询；完成日线条件不等于买入信号',
             exit='收盘跌破防守位退出；冲高失去VWAP或量价转弱先减仓。')
+    reclaim=reclaim_match(bars)
+    if reclaim:
+        support=max(line['ma'] for line in reclaim['lines'])
+        labels='/'.join('MA'+str(line['period']) for line in reclaim['lines'])
+        event=next(b for b in reversed(bars[-20:]) if b.get('limit')==1)
+        record('pullback',event,min(last['low'],support*.99),[support*.99,support*1.01],
+            '重新站回'+labels+' · 待承接确认',
+            f"近20交易日累计{reclaim['count']}次涨停；MA5>MA10>MA20且三线均向上；"+'；'.join(
+                f"MA{x['period']}={x['ma']:.3f}，"+('昨日收盘在线下' if x['priorBelow'] else '当日盘中跌破')+'后当日重新站上'
+                for x in reclaim['lines']))
+        found['pullback'].update(limitCount20=reclaim['count'],reclaimLines=reclaim['lines'],
+            ruleVersion=PULLBACK_RULE_VERSION,signalDate=last['date'],bullishAverages=reclaim['trend'])
+    if last.get('amount',0)<=1e8:
+        return found
     # Historical official limit status is independent of price adjustment.
     limits = [b.get('limit') == 1 for b in bars]
     for i in range(len(bars)-1, max(0,len(bars)-6), -1):
@@ -187,18 +217,6 @@ def evaluate(bars):
                 record('triple', b, b['low'], [b['low'],upper], status,
                     f"同日量比{b['volume']/previous['volume']:.2f}倍；阳线涨{b['change']:.2f}%；右侧需收阳且收盘>{b['high']:.2f}")
             break
-    reclaim=reclaim_match(bars)
-    if reclaim:
-        support=max(line['ma'] for line in reclaim['lines'])
-        labels='/'.join('MA'+str(line['period']) for line in reclaim['lines'])
-        event=next(b for b in reversed(bars[-20:]) if b.get('limit')==1)
-        record('pullback',event,min(last['low'],support*.99),[support*.99,support*1.01],
-            '重新站回'+labels+' · 待承接确认',
-            f"近20交易日累计{reclaim['count']}次涨停；"+'；'.join(
-                f"MA{x['period']}={x['ma']:.3f}，"+('昨日收盘在线下' if x['priorBelow'] else '当日盘中跌破')+'后当日重新站上'
-                for x in reclaim['lines']))
-        found['pullback'].update(limitCount20=reclaim['count'],reclaimLines=reclaim['lines'],
-            ruleVersion=PULLBACK_RULE_VERSION,signalDate=last['date'])
     if last['change'] >= 5:
         if 'triple' in found:
             found['triple']['status']='涨幅≥5% · 仅观察不追涨'
@@ -281,6 +299,7 @@ def main():
         for row in rows:
             code=str(row.get('SECURITY_CODE','')).zfill(6)
             if len(code)!=6 or not code.isdigit(): continue
+            if kind=='pullback' and not pullback_security_allowed(code,row.get('SECURITY_SHORT_NAME','')): continue
             universe[code]=row.get('SECURITY_SHORT_NAME',code)
             membership.setdefault(code,set()).add(kind)
         groups[kind]=[]
@@ -311,7 +330,7 @@ def main():
                     raise
                 except RuntimeError:
                     bars=[]
-            if len(bars)<35 or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]) or 'amount' not in bars[-1]:
+            if len(bars)<35 or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]):
                 failures.append({'code':code,'name':universe[code],'reason':'日K、涨停状态或交易日期不完整，未冒充通过'})
                 continue
             verified+=1
@@ -340,7 +359,7 @@ def main():
         groupAsOf=group_dates,groupGeneratedAt=group_generated,groupStats=group_stats,ruleVersions=rule_versions,mode=mode,
         groups=groups,priceBasis='前复权日K；涨停采用妙想每日是否涨停字段确认，不用复权价格推算涨停。',
         schedule='涨停回调策略工作日09:15竞价观察、14:40盘中查询；15:45收盘复核全策略（北京时间，后台排队可能延迟）。',
-        ruleVersion=PULLBACK_RULE_VERSION,limitations='涨停回调：近20交易日累计2–3次涨停，跌破MA5或MA10后当日重新站回任一均线。09:15没有当日完整日K，只列昨日形态与竞价待确认；14:40为临时信号，收盘再复核。未自动交易或加入自选。')
+        ruleVersion=PULLBACK_RULE_VERSION,limitations='涨停回调：沪深主板非ST、上市超过365天；近20交易日至少2次涨停；MA5>MA10>MA20且三线均向上；当日股价上穿MA5或MA10。09:15没有当日完整日K，只列昨日形态与竞价待确认；14:40为临时信号，收盘再复核。未自动交易或加入自选。')
     output.parent.mkdir(parents=True,exist_ok=True)
     output.write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
     print('Private report ready; verified:',verified,'unavailable:',len(failures))

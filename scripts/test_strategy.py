@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import strategy_screen as strategy
-from strategy_screen import evaluate, bars_from_tables, check_quota, QuotaExceeded, reclaim_match
+from strategy_screen import evaluate, bars_from_tables, check_quota, QuotaExceeded, reclaim_match, pullback_security_allowed, bullish_averages
 
 
 def history():
@@ -18,17 +18,42 @@ def history():
 class StrategyTests(unittest.TestCase):
     def reclaim_history(self,count=2):
         bars=history()
+        for i,b in enumerate(bars,1): b.update(close=8+i*.1,open=8+i*.1,high=8+i*.1+.2,low=8+i*.1-.1)
         for i in range(count): bars[-20+i]['limit']=1
-        bars[-2].update(close=9.6,low=9.5)
-        bars[-1].update(open=9.7,low=9.5,high=10.3,close=10.2,change=2)
+        bars[-2].update(close=11.5,low=11.4)
+        bars[-1].update(open=11.6,low=11.4,high=12.1,close=12,change=4.35)
         return bars
 
-    def test_two_or_three_limits_and_either_average(self):
-        for count in (2,3):
+    def test_at_least_two_limits_without_upper_cap(self):
+        for count in (2,3,4,8):
             item=evaluate(self.reclaim_history(count))['pullback']
             self.assertEqual(item['limitCount20'],count)
             self.assertEqual({x['period'] for x in item['reclaimLines']},{5,10})
-        for count in (0,1,4): self.assertNotIn('pullback',evaluate(self.reclaim_history(count)))
+        for count in (0,1): self.assertNotIn('pullback',evaluate(self.reclaim_history(count)))
+
+    def test_mainboard_only_and_st_exclusions(self):
+        for code in ('000001','001359','002029','003000','600000','601000','603000','605000'):
+            self.assertTrue(pullback_security_allowed(code,'测试公司'))
+        for code in ('300001','301001','688001','689001','920001','830001','870001','430001','900001','200001'):
+            self.assertFalse(pullback_security_allowed(code,'测试公司'))
+        for name in ('ST测试','*ST测试','ＳＴ测试','测试退'):
+            self.assertFalse(pullback_security_allowed('600000',name))
+
+    def test_bullish_alignment_and_all_three_slopes_are_required(self):
+        bars=self.reclaim_history()
+        self.assertIsNotNone(bullish_averages(bars))
+        flat=history();flat[-20]['limit']=flat[-18]['limit']=1
+        flat[-1].update(low=9.8,close=10)
+        self.assertIsNone(reclaim_match(flat))
+        falling=self.reclaim_history();falling[-21]['close']=12.5
+        self.assertIsNone(reclaim_match(falling))
+        wrong=self.reclaim_history()
+        for b in wrong[-20:-5]: b['close']=14
+        self.assertIsNone(reclaim_match(wrong))
+
+    def test_pullback_does_not_inherit_old_turnover_filter(self):
+        bars=self.reclaim_history();bars[-1]['amount']=50000000
+        self.assertIn('pullback',evaluate(bars))
 
     def test_limits_outside_20_days_do_not_count_and_need_no_consecutive_boards(self):
         bars=self.reclaim_history(2);bars[-19]['limit']=0;bars[-1]['limit']=1
@@ -46,19 +71,17 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNone(reclaim_match(bars))
 
     def test_intraday_breach_and_return_is_valid(self):
-        bars=history();bars[-20]['limit']=bars[-18]['limit']=1
-        bars[-1].update(low=9.8,close=10.2)
+        bars=self.reclaim_history();bars[-2]['close']=11.9
         result=reclaim_match(bars)
         self.assertTrue(all(x['intradayBelow'] and not x['priorBelow'] for x in result['lines']))
 
     def test_one_average_is_enough(self):
         bars=self.reclaim_history(2)
-        for x in bars[-10:-5]: x['close']=13
+        bars[-2]['close']=11.6;bars[-1]['low']=11.6
         result=reclaim_match(bars)
         self.assertEqual([x['period'] for x in result['lines']],[5])
         bars=self.reclaim_history(2)
-        for x in bars[-10:-5]: x['close']=8
-        for x in bars[-5:-2]: x['close']=12
+        bars[-1]['close']=11.65
         self.assertEqual([x['period'] for x in reclaim_match(bars)['lines']],[10])
 
     def test_unknown_limit_status_cannot_pass(self):

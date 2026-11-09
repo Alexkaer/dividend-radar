@@ -19,4 +19,8 @@ assert.equal(rank({second:[item]},quotes,{second:'2026-11-04'},now).top.length,1
 assert.equal(rank({second:[item]},quotes,{second:'2026-10-20'},now).top.length,0);
 assert.equal(rank({pullback:[{...item,status:'竞价观察 · 昨日收复，今日待确认'}]},quotes,'2026-11-04',now).top.length,0);
 assert.equal(rank({pullback:[{...item,close:10.1,reclaimLines:[{ma:10.15,period:5}]}]},quotes,'2026-11-04',now).top.length,0);
+const bullishItem={...item,close:10.1,reclaimLines:[{ma:9.8,period:10}],bullishAverages:{current:{5:10,10:9.8,20:9.5},previous:{5:9.96,10:9.75,20:9.45}}};
+assert.equal(rank({pullback:[bullishItem]},quotes,'2026-11-04',now).top.length,1);
+assert.equal(rank({pullback:[bullishItem]},{'000001':{price:9.85,change:1,time}},'2026-11-04',now).top.length,0);
+assert.equal(rank({pullback:[bullishItem]},{'000001':{price:10.1,change:2,time:time+86400}},'2026-11-04',now+86400000).top.length,0);
 console.log('Top-five deduplication, risk gates, stale data and ranking checks passed.');

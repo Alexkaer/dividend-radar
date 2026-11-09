@@ -3,6 +3,15 @@
   const finite=x=>typeof x==='number'&&Number.isFinite(x);
   const round=x=>Math.round(x*100)/100;
   function stillReclaimed(item,price){
+    if(item.bullishAverages){
+      const trend=item.bullishAverages,averages={};
+      for(const n of [5,10,20]){
+        if(!finite(trend.current?.[n])||!finite(trend.previous?.[n])||!finite(item.close))return false;
+        averages[n]=(trend.current[n]*n-item.close+price)/n;
+        if(averages[n]<=trend.previous[n])return false;
+      }
+      if(!(averages[5]>averages[10]&&averages[10]>averages[20]))return false;
+    }
     return !Array.isArray(item.reclaimLines)||item.reclaimLines.some(line=>
       finite(line.ma)&&finite(line.period)&&finite(item.close)&&price>(line.ma*line.period-item.close+price)/line.period);
   }
@@ -31,6 +40,8 @@
       if(!state.valid || quote.change>=5 || quote.change<=-5 || quote.price<=item.invalidation || !finite(item.invalidation)||!Array.isArray(item.zone)||item.zone.length!==2||!item.zone.every(finite))continue;
       const referenceDate=typeof asOf==='object'?asOf[kind]:asOf;
       if(!referenceDate||state.date<referenceDate || (Date.parse(state.date)-Date.parse(referenceDate))/86400000>4)continue;
+      // Today's upward cross cannot be inferred from yesterday's MA snapshot.
+      if(kind==='pullback'&&item.bullishAverages&&state.date!==referenceDate)continue;
       if(kind==='pullback'&&!stillReclaimed(item,quote.price))continue;
       if(item.status.includes('竞价观察'))continue;
       if(/高风险|跳空|信号日|仅观察/.test(item.status))continue;
