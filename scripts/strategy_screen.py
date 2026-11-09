@@ -138,9 +138,10 @@ def pullback_security_allowed(code, name):
 
 
 def bullish_averages(bars):
+    from math import fsum
     if len(bars)<21: return None
-    current={n:sum(b['close'] for b in bars[-n:])/n for n in (5,10,20)}
-    previous={n:sum(b['close'] for b in bars[-n-1:-1])/n for n in (5,10,20)}
+    current={n:round(fsum(b['close'] for b in bars[-n:])/n,10) for n in (5,10,20)}
+    previous={n:round(fsum(b['close'] for b in bars[-n-1:-1])/n,10) for n in (5,10,20)}
     if not current[5]>current[10]>current[20]: return None
     if not all(current[n]>previous[n] for n in current): return None
     return dict(current=current,previous=previous)
@@ -157,10 +158,10 @@ def reclaim_match(bars):
     last,previous=bars[-1],bars[-2]
     lines=[]
     for period in (5,10):
-        ma=sum(b['close'] for b in bars[-period:])/period
-        prior_ma=sum(b['close'] for b in bars[-period-1:-1])/period
+        ma=trend['current'][period]
+        prior_ma=trend['previous'][period]
         # During today's low tick, MA includes that low tick, not the later closing price.
-        low_tick_ma=(sum(b['close'] for b in bars[-period:-1])+last['low'])/period
+        low_tick_ma=round(__import__('math').fsum([*(b['close'] for b in bars[-period:-1]),last['low']])/period,10)
         was_below=previous['close']<prior_ma
         dipped_today=last['low']<low_tick_ma
         if last['close']>ma and (was_below or dipped_today):
