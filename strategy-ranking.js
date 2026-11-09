@@ -2,6 +2,10 @@
   'use strict';
   const finite=x=>typeof x==='number'&&Number.isFinite(x);
   const round=x=>Math.round(x*100)/100;
+  function stillReclaimed(item,price){
+    return !Array.isArray(item.reclaimLines)||item.reclaimLines.some(line=>
+      finite(line.ma)&&finite(line.period)&&finite(item.close)&&price>(line.ma*line.period-item.close+price)/line.period);
+  }
   function quoteState(quote,now=Date.now()){
     if(!quote || !finite(quote.price) || quote.price<=0 || !finite(quote.change) || !finite(quote.time))return {valid:false,label:'行情缺失'};
     const stamp=new Date(quote.time*1000),current=new Date(now);
@@ -25,7 +29,10 @@
       total++;
       const quote=quotes?.[item.code],state=quoteState(quote,now);
       if(!state.valid || quote.change>=5 || quote.change<=-5 || quote.price<=item.invalidation || !finite(item.invalidation)||!Array.isArray(item.zone)||item.zone.length!==2||!item.zone.every(finite))continue;
-      if(state.date<asOf || (Date.parse(state.date)-Date.parse(asOf))/86400000>4)continue;
+      const referenceDate=typeof asOf==='object'?asOf[kind]:asOf;
+      if(!referenceDate||state.date<referenceDate || (Date.parse(state.date)-Date.parse(referenceDate))/86400000>4)continue;
+      if(kind==='pullback'&&!stillReclaimed(item,quote.price))continue;
+      if(item.status.includes('竞价观察'))continue;
       if(/高风险|跳空|信号日|仅观察/.test(item.status))continue;
       const [low,high]=item.zone;
       if(low>high||high<=item.invalidation)continue;
@@ -47,5 +54,5 @@
     const ranked=[...candidates.values()].sort((a,b)=>b.score-a.score||a.risk-b.risk||a.code.localeCompare(b.code));
     return {top:ranked.slice(0,5),eligible:ranked.length,total};
   }
-  const api={rank,quoteState};if(typeof module==='object'&&module.exports)module.exports=api;else root.StrategyRanking=api;
+  const api={rank,quoteState,stillReclaimed};if(typeof module==='object'&&module.exports)module.exports=api;else root.StrategyRanking=api;
 })(typeof window!=='undefined'?window:globalThis);

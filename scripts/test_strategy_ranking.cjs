@@ -15,4 +15,8 @@ assert.equal(rank({second:[item]},quotes,'2026-10-20',now).top.length,0);
 const seven=Array.from({length:7},(_,i)=>({...item,code:String(i).padStart(6,'0')}));
 const many=Object.fromEntries(seven.map(x=>[x.code,{price:10.1,change:2,time}]));
 assert.equal(rank({second:seven},many,'2026-11-04',now).top.length,5);
+assert.equal(rank({second:[item]},quotes,{second:'2026-11-04'},now).top.length,1);
+assert.equal(rank({second:[item]},quotes,{second:'2026-10-20'},now).top.length,0);
+assert.equal(rank({pullback:[{...item,status:'竞价观察 · 昨日收复，今日待确认'}]},quotes,'2026-11-04',now).top.length,0);
+assert.equal(rank({pullback:[{...item,close:10.1,reclaimLines:[{ma:10.15,period:5}]}]},quotes,'2026-11-04',now).top.length,0);
 console.log('Top-five deduplication, risk gates, stale data and ranking checks passed.');

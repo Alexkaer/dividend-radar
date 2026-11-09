@@ -10,8 +10,9 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = Path(tempfile.gettempdir()) / 'dividend-strategy-private-cache'
+PULLBACK_RULE_VERSION = '2026-11-09-ma-reclaim-v2'
 QUERIES = {
-    'pullback': 'A股，非ST，上市天数大于365天，最近20个交易日内涨停次数大于等于1，今日涨跌幅小于5%，今日成交额大于1亿元',
+    'pullback': 'A股，非ST，上市天数大于365天，最近20个交易日内涨停次数大于等于2次且小于等于3次，今日成交额大于1亿元',
     'second': 'A股，非ST，上市天数大于365天，最近30个交易日内连续涨停天数大于等于2天，今日涨跌幅小于5%，今日成交额大于1亿元',
     'triple': 'A股，非ST，上市天数大于365天，最近5个交易日内成交量环比增长率大于等于200%出现次数大于0，最近5个交易日内当日涨幅大于3%出现次数大于0，今日成交额大于1亿元',
 }
@@ -64,6 +65,8 @@ def screen(query, day):
     result = api('stock-screen', query, day)
     all_results = result.get('allResults') or {}
     table = all_results.get('result') or {}
+    if not all_results or 'dataList' not in table:
+        raise RuntimeError('MX did not return a validated screening table; previous snapshot retained')
     rows = table.get('dataList') or []
     total = int(table.get('totalRecordCount', table.get('total', len(rows))))
     return rows, total, all_results.get('totalCondition')
@@ -127,6 +130,27 @@ def bars_from_tables(blocks, code):
     return [dict(date=d, **row) for d, row in sorted(series.items()) if all(k in row for k in ('open','high','low','close','volume','change'))]
 
 
+def reclaim_match(bars):
+    """2–3 official limit-ups in 20 sessions, then a strict MA5/MA10 reclaim."""
+    if len(bars)<21 or any(b.get('limit') not in (0,1) for b in bars[-20:]):
+        return None
+    count=sum(b['limit']==1 for b in bars[-20:])
+    if count not in (2,3): return None
+    last,previous=bars[-1],bars[-2]
+    lines=[]
+    for period in (5,10):
+        ma=sum(b['close'] for b in bars[-period:])/period
+        prior_ma=sum(b['close'] for b in bars[-period-1:-1])/period
+        # During today's low tick, MA includes that low tick, not the later closing price.
+        low_tick_ma=(sum(b['close'] for b in bars[-period:-1])+last['low'])/period
+        was_below=previous['close']<prior_ma
+        dipped_today=last['low']<low_tick_ma
+        if last['close']>ma and (was_below or dipped_today):
+            lines.append(dict(period=period,ma=ma,previousMA=prior_ma,previousClose=previous['close'],
+                priorBelow=was_below,intradayBelow=dipped_today))
+    return dict(count=count,lines=lines) if lines else None
+
+
 def evaluate(bars):
     """Mechanical closing-bar checks only; intraday/sector acceptance remains unknown."""
     found = {}
@@ -163,9 +187,23 @@ def evaluate(bars):
                 record('triple', b, b['low'], [b['low'],upper], status,
                     f"同日量比{b['volume']/previous['volume']:.2f}倍；阳线涨{b['change']:.2f}%；右侧需收阳且收盘>{b['high']:.2f}")
             break
+    reclaim=reclaim_match(bars)
+    if reclaim:
+        support=max(line['ma'] for line in reclaim['lines'])
+        labels='/'.join('MA'+str(line['period']) for line in reclaim['lines'])
+        event=next(b for b in reversed(bars[-20:]) if b.get('limit')==1)
+        record('pullback',event,min(last['low'],support*.99),[support*.99,support*1.01],
+            '重新站回'+labels+' · 待承接确认',
+            f"近20交易日累计{reclaim['count']}次涨停；"+'；'.join(
+                f"MA{x['period']}={x['ma']:.3f}，"+('昨日收盘在线下' if x['priorBelow'] else '当日盘中跌破')+'后当日重新站上'
+                for x in reclaim['lines']))
+        found['pullback'].update(limitCount20=reclaim['count'],reclaimLines=reclaim['lines'],
+            ruleVersion=PULLBACK_RULE_VERSION,signalDate=last['date'])
     if last['change'] >= 5:
         if 'triple' in found:
             found['triple']['status']='涨幅≥5% · 仅观察不追涨'
+        if 'pullback' in found:
+            found['pullback']['status']='涨幅≥5% · 仅观察不追涨'
         return found
     # First break after consecutive official limits; prefer 3–10 full sessions afterwards.
     for end in range(len(bars)-2, max(0,len(bars)-31), -1):
@@ -187,19 +225,6 @@ def evaluate(bars):
             f"真实连续{count}板 {bars[start]['date']}~{bars[end]['date']}；断板后{age}日；量/断板量={last['volume']/broken['volume']:.2f}；MA10={ma:.2f}" + ('；含一字板' if one_price else ''))
         found['second']['volumeRatio']=round(last['volume']/broken['volume'],4)
         break
-    # 20-session limit-up, real retreat and closing bullish recovery near MA10.
-    for i in range(len(bars)-3, max(-1,len(bars)-21), -1):
-        event=bars[i]
-        if not limits[i]: continue
-        after=bars[i+1:]
-        support=min(x['low'] for x in after)
-        ma=sum(b['close'] for b in bars[-10:])/10
-        retreat=min(x['close'] for x in after) < event['close']*.98
-        recovery=last['close'] > last['open'] and last['close'] > bars[-2]['close'] and last['close'] >= ma
-        if retreat and recovery and support >= event['low'] and last['close'] <= ma*1.03:
-            record('pullback',event,support,[max(support,ma*.99),ma*1.01], '回调转强 · 待竞价承接',
-                f"涨停日{event['date']}；回调低点{support:.2f}；收阳转强并收复MA10 {ma:.2f}")
-            break
     return found
 
 
@@ -207,32 +232,52 @@ def main():
     import argparse
     parser=argparse.ArgumentParser()
     parser.add_argument('--output', required=True)
+    parser.add_argument('--previous')
+    parser.add_argument('--mode', choices=('auto','auction','intraday','close'), default='auto')
+    parser.add_argument('--pullback-only',action='store_true')
     args=parser.parse_args()
     output=Path(args.output).resolve()
     if output == ROOT or ROOT in output.parents:
         raise SystemExit('Plaintext output must be outside the repository')
     now=dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
     today=now.date().isoformat()
-    if (now.hour,now.minute) < (15,15):
-        print('Daily closing bars are not complete; previous snapshot retained.')
-        return
+    mode=args.mode if args.mode!='auto' else ('auction' if (now.hour,now.minute)<(9,30) else 'intraday' if (now.hour,now.minute)<(15,15) else 'close')
+    cache_slot=today+'-'+mode+'-'+now.strftime('%H%M')
+    previous={}
+    if args.previous:
+        prior_path=Path(args.previous).resolve()
+        if ROOT in prior_path.parents: raise RuntimeError('Previous plaintext must remain outside repository')
+        previous=json.loads(prior_path.read_text(encoding='utf-8'))
     dates=[]
     for date_query in ('上证指数最近5个交易日每日收盘价，返回交易日期',
                        '上证指数000001.SH最近10个交易日每日收盘价和成交额，返回每个交易日期',
                        '600000浦发银行最近5个交易日每日前复权收盘价，返回交易日期'):
-        index=api('query',date_query,today)
+        index=api('query',date_query,cache_slot)
         dates=[str(d)[:10] for b in tables(index) for d in (b.get('rawTable') or {}).get('headName',[])
-               if __import__('re').fullmatch(r'\d{4}-\d{2}-\d{2}',str(d)[:10]) and str(d)[:10]<=today]
+               if __import__('re').fullmatch(r'\d{4}-\d{2}-\d{2}',str(d)[:10]) and (str(d)[:10]<today if mode=='auction' else str(d)[:10]<=today)]
         if dates: break
         print('MX date query returned no historical date table; trying explicit security query.',flush=True)
     if not dates: raise RuntimeError('No validated market session date; retaining original snapshot')
     session=max(dates)
-    if session != today:
+    if mode!='auction' and session != today:
         print('No current trading session; previous snapshot retained.')
         return
-    groups={}; coverage={}; universe={}; membership={}
-    for kind, query in QUERIES.items():
-        rows,coverage[kind]=wide_screen(query,today)
+    partial=args.pullback_only or mode!='close'
+    groups=previous.get('groups',{}).copy() if partial else {}
+    coverage=previous.get('coverage',{}).copy() if partial else {}
+    queries=previous.get('queries',{}).copy() if partial else {}
+    group_dates=previous.get('groupAsOf',{k:previous.get('asOf') for k in groups}).copy()
+    group_generated=previous.get('groupGeneratedAt',{k:previous.get('generatedAt') for k in groups}).copy()
+    group_stats=previous.get('groupStats',{k:dict(verified=previous.get('verified',0),universe=previous.get('universe',0),
+        failures=previous.get('failures',[]),mode='close') for k in groups}).copy()
+    rule_versions=previous.get('ruleVersions',{}).copy()
+    universe={}; membership={}
+    selected=('pullback',) if partial else tuple(QUERIES)
+    for kind in selected:
+        query=QUERIES[kind]
+        if mode=='auction': query=query.replace('今日成交额','最近一个完整交易日成交额').replace('最近20个交易日内','截至最近一个完整交易日的最近20个交易日内')
+        queries[kind]=query
+        rows,coverage[kind]=wide_screen(query,cache_slot)
         for row in rows:
             code=str(row.get('SECURITY_CODE','')).zfill(6)
             if len(code)!=6 or not code.isdigit(): continue
@@ -243,20 +288,25 @@ def main():
     codes=sorted(universe); failures=[]; verified=0
     for start in range(0,len(codes),5):
         batch=codes[start:start+5]
-        query='、'.join(c+str(universe[c]) for c in batch)+'分别最近40个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回每只股票代码和交易日期'
+        # MX's explicit "前复权" wording can resolve to fixed-base close for only
+        # one entity. Ordinary daily OHLC resolves all entities; the parser still
+        # strictly requires AdjustFlag=1 metadata for every accepted price field.
+        query='、'.join(batch)+'分别最近40个交易日每日开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回每只股票代码和交易日期'
         try:
-            blocks=tables(api('query',query,today))
+            blocks=tables(api('query',query,cache_slot))
         except QuotaExceeded:
             raise
         except RuntimeError:
             blocks=[]
         for code in batch:
             bars=bars_from_tables(blocks,code)
+            bars=[b for b in bars if b['date']<=session]
             if len(bars)<35 or not bars or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]):
                 # MX occasionally omits an entity in multi-stock queries; retry it alone.
                 single=code+str(universe[code])+'最近40个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回交易日期'
                 try:
-                    bars=bars_from_tables(tables(api('query',single,today)),code)
+                    bars=bars_from_tables(tables(api('query',single,cache_slot)),code)
+                    bars=[b for b in bars if b['date']<=session]
                 except QuotaExceeded:
                     raise
                 except RuntimeError:
@@ -267,15 +317,28 @@ def main():
             verified+=1
             result=evaluate(bars)
             for kind,item in result.items():
-                if kind in membership[code]: groups[kind].append(dict(code=code,name=universe[code],**item))
+                if kind in membership[code]:
+                    if mode=='auction': item.update(status='竞价观察 · 昨日收复，今日待确认',provisional=True)
+                    elif mode=='intraday': item.update(status='盘中临时 · '+item['status'],provisional=True)
+                    item['evaluatedAt']=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
+                    groups[kind].append(dict(code=code,name=universe[code],**item))
         print('K-line progress:',min(start+5,len(codes)),'/',len(codes),flush=True)
     for values in groups.values(): values.sort(key=lambda r:(r['signalDate'],r['change']),reverse=True)
-    if not verified: raise RuntimeError('No verified daily K-lines; retaining previous snapshot')
+    if codes and not verified: raise RuntimeError('No verified daily K-lines; retaining previous snapshot')
+    for kind in ('pullback','second','triple'):
+        groups.setdefault(kind,[])
+        coverage.setdefault(kind,dict(total=0,returned=0,complete=False,conditions=[]))
+    for kind in selected:
+        group_dates[kind]=session
+        group_generated[kind]=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
+        group_stats[kind]=dict(verified=verified,universe=len(codes),failures=failures,mode=mode)
+    if 'pullback' in selected: rule_versions['pullback']=PULLBACK_RULE_VERSION
     report=dict(version=1,asOf=session,generatedAt=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(),
-        source='东方财富妙想 mx-xuangu + mx-data',queries=QUERIES,coverage=coverage,verified=verified,universe=len(codes),failures=failures,
+        source='东方财富妙想 mx-xuangu + mx-data',queries=queries,coverage=coverage,verified=verified,universe=len(codes),failures=failures,
+        groupAsOf=group_dates,groupGeneratedAt=group_generated,groupStats=group_stats,ruleVersions=rule_versions,mode=mode,
         groups=groups,priceBasis='前复权日K；涨停采用妙想每日是否涨停字段确认，不用复权价格推算涨停。',
-        schedule='交易日15:45（北京时间）；节假日保留上一交易日；接口失败不改写原日期。',
-        ruleVersion='2026-11-04-v1',limitations='机械日线观察池，不构成买入信号。竞价9:25、承接9:40为核心检查，14:40补充；三倍量/二板回调14:45确认。未自动交易或加入自选。')
+        schedule='涨停回调策略工作日09:15竞价观察、14:40盘中查询；15:45收盘复核全策略（北京时间，后台排队可能延迟）。',
+        ruleVersion=PULLBACK_RULE_VERSION,limitations='涨停回调：近20交易日累计2–3次涨停，跌破MA5或MA10后当日重新站回任一均线。09:15没有当日完整日K，只列昨日形态与竞价待确认；14:40为临时信号，收盘再复核。未自动交易或加入自选。')
     output.parent.mkdir(parents=True,exist_ok=True)
     output.write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
     print('Private report ready; verified:',verified,'unavailable:',len(failures))

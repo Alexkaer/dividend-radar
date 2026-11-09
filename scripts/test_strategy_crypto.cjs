@@ -1,9 +1,11 @@
 const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
-const {encrypt}=require('./encrypt_strategy.cjs');
+const {encrypt,decrypt:serverDecrypt}=require('./encrypt_strategy.cjs');
 (async()=>{
   const data={groups:{triple:[{name:'private fixture'}]},asOf:'2026-11-04'};
   const e=encrypt(data,'fixture-user','fixture-password');
+  assert.deepEqual(serverDecrypt(e,'fixture-user','fixture-password'),data);
+  assert.throws(()=>serverDecrypt(e,'other-user','fixture-password'));
   assert(!JSON.stringify(e).includes('private fixture'));
   async function decrypt(user,password,envelope=e){
     const material=await crypto.webcrypto.subtle.importKey('raw',new TextEncoder().encode(user+'\0'+password),'PBKDF2',false,['deriveBits']);
