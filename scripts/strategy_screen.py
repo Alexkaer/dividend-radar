@@ -8,9 +8,12 @@ import tempfile
 import time
 import urllib.request
 
+_SECTOR_CHANGES = None
+_INTRADAY_CONTEXT = {}
+
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = Path(tempfile.gettempdir()) / 'dividend-strategy-private-cache'
-PULLBACK_RULE_VERSION = '2026-11-09-mainboard-bullish-v3'
+PULLBACK_RULE_VERSION = '2026-11-10-mainboard-reclaim-v4'
 QUERIES = {
     'pullback': '沪深主板A股，非ST，非创业板，非科创板，非北交所，上市天数大于365天，最近20个交易日内涨停次数大于等于2次',
     'second': 'A股，非ST，上市天数大于365天，最近30个交易日内连续涨停天数大于等于2天，今日涨跌幅小于5%，今日成交额大于1亿元',
@@ -59,6 +62,103 @@ def api(endpoint, query, day):
         except Exception:
             if attempt == 4:
                 raise RuntimeError('MX request failed after retries; retaining previous encrypted snapshot') from None
+
+
+def public_json(url):
+    request=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Referer':'https://quote.eastmoney.com/'})
+    with urllib.request.urlopen(request,timeout=20) as response:
+        return json.load(response)
+
+
+def sector_changes():
+    global _SECTOR_CHANGES
+    if _SECTOR_CHANGES is None:
+        url=('https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&fltt=2&invt=2'
+             '&fid=f3&fs=m:90+t:2&fields=f12,f14,f3')
+        rows=((public_json(url).get('data') or {}).get('diff') or [])
+        _SECTOR_CHANGES={str(row.get('f14','')):float(row['f3']) for row in rows if row.get('f14') and row.get('f3') is not None}
+    return _SECTOR_CHANGES
+
+
+def intraday_context(code,cutoff=None):
+    cache_key=(code,cutoff)
+    if cache_key in _INTRADAY_CONTEXT: return _INTRADAY_CONTEXT[cache_key]
+    secid=('1.' if code.startswith('6') else '0.')+code
+    quote=(public_json('https://push2.eastmoney.com/api/qt/stock/get?secid='+secid+
+        '&fields=f57,f58,f43,f170,f127').get('data') or {})
+    sector=str(quote.get('f127') or '未知行业')
+    change=sector_changes().get(sector)
+    data=(public_json('https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid='+secid+
+        '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58&ndays=1&iscr=0&iscca=0').get('data') or {})
+    minutes=[]
+    for raw in data.get('trends') or []:
+        value=raw.split(',')
+        if cutoff and value[0][11:16]>cutoff: continue
+        minutes.append(dict(time=value[0],open=float(value[1]),close=float(value[2]),high=float(value[3]),
+            low=float(value[4]),volume=float(value[5]),vwap=float(value[7])))
+    if not minutes:
+        result=dict(sector=sector,sectorChange=change);_INTRADAY_CONTEXT[cache_key]=result;return result
+    bars=[]
+    for start in range(0,len(minutes),5):
+        part=minutes[start:start+5]
+        if len(part)!=5: continue
+        bars.append(dict(time=part[-1]['time'],open=part[0]['open'],close=part[-1]['close'],
+            high=max(x['high'] for x in part),low=min(x['low'] for x in part),
+            volume=sum(x['volume'] for x in part),vwap=part[-1]['vwap']))
+    signal=None; previous_close=float(data.get('preClose') or 0)
+    for i in range(5,len(bars)):
+        bar=bars[i]; base=sum(x['volume'] for x in bars[i-5:i])/5
+        ratio=bar['volume']/base if base else 0
+        underwater=bar['low']<previous_close and bar['close']>previous_close
+        breakout=bar['open']>=previous_close and bar['close']>max(x['high'] for x in bars[i-3:i])
+        if ratio>=1.5 and bar['close']>bar['open'] and bar['close']>bar['vwap'] and (underwater or breakout):
+            signal=dict(time=bar['time'],ratio=round(ratio,2),kind='水下收复' if underwater else '水上突破')
+    last=minutes[-1]
+    result=dict(currentPrice=last['close'],quoteTime=last['time'],vwap=last['vwap'],aboveVwap=last['close']>last['vwap'],
+        sessionOpen=minutes[0]['open'],sessionHigh=max(x['high'] for x in minutes),sessionLow=min(x['low'] for x in minutes),
+        sessionVolume=sum(x['volume'] for x in minutes),volumeSignal=signal,sector=sector,sectorChange=change)
+    _INTRADAY_CONTEXT[cache_key]=result
+    return result
+
+
+def apply_trade_plan(item,context,mode):
+    item['intraday']=context
+    ma5=item['bullishAverages']['current'][5]
+    price=context.get('currentPrice',item['close'])
+    lower=max(ma5,context.get('vwap',ma5))
+    upper=min(price,ma5*1.025)
+    if upper<lower: lower,upper=ma5,ma5*1.025
+    stop=ma5*.99; target=item['firstTarget']; entry=(lower+upper)/2
+    rr=(target-entry)/(entry-stop) if entry>stop else 0
+    sector_change=context.get('sectorChange')
+    confirmed=(mode=='intraday' and context.get('aboveVwap') and context.get('volumeSignal') and
+        sector_change is not None and sector_change>0 and rr>=2)
+    position=10 if confirmed and sector_change>=1.5 else 5 if confirmed else 0
+    item.update(entryRange=[round(lower,3),round(upper,3)],invalidation=round(stop,3),stopPrice=round(stop,3),
+        rewardRisk=round(rr,2),recommendedPosition=position,
+        action='A+可上车' if position==10 else 'A类可上车' if position==5 else '观察/等条件',
+        status=('盘中确认 · 可按区间低吸' if position else '日线满足 · 分时/板块/盈亏比未全部确认'))
+    item['confirmation']=(f"行业{context.get('sector','未知')}"
+        +(f" {sector_change:+.2f}%" if sector_change is not None else '涨幅未知')+
+        ('；价格在VWAP上方' if context.get('aboveVwap') else '；价格未站稳VWAP')+
+        ('；5分钟放量确认' if context.get('volumeSignal') else '；未见合格5分钟放量')+
+        f"；计划盈亏比{rr:.2f}:1")
+
+
+def enforce_portfolio_cap(items):
+    eligible=[item for item in items if item.get('recommendedPosition',0)>0]
+    def score(item):
+        context=item.get('intraday') or {}; signal=context.get('volumeSignal') or {}
+        return (float(context.get('sectorChange') or 0)+min(float(item.get('rewardRisk') or 0),4)+
+            min(float(signal.get('ratio') or 0),3),float(item.get('rewardRisk') or 0))
+    eligible.sort(key=score,reverse=True)
+    selected={item['code']:(10 if index==0 else 5) for index,item in enumerate(eligible[:3])}
+    for item in items:
+        if item.get('recommendedPosition',0)<=0: continue
+        allocation=selected.get(item['code'],0)
+        item['recommendedPosition']=allocation
+        item['action']='A+可上车' if allocation==10 else 'A类可上车' if allocation==5 else '观察/等总仓位名额'
+        if not allocation: item['status']='个股条件满足，但当日新增仓位上限20%，不再新增'
 
 
 def screen(query, day):
@@ -142,32 +242,38 @@ def bullish_averages(bars):
     if len(bars)<21: return None
     current={n:round(fsum(b['close'] for b in bars[-n:])/n,10) for n in (5,10,20)}
     previous={n:round(fsum(b['close'] for b in bars[-n-1:-1])/n,10) for n in (5,10,20)}
-    if not current[5]>current[10]>current[20]: return None
-    if not all(current[n]>previous[n] for n in current): return None
+    if not current[10]>current[20]: return None
+    if not all(current[n]>previous[n] for n in (10,20)): return None
     return dict(current=current,previous=previous)
 
 
 def reclaim_match(bars):
-    """At least two official limit-ups, bullish MA5/10/20, a fresh upward cross."""
+    """Final pullback rule: MA20 hold, rising K centers/MA10/20, MA5 recovery."""
     if len(bars)<21 or any(b.get('limit') not in (0,1) for b in bars[-20:]):
         return None
     count=sum(b['limit']==1 for b in bars[-20:])
     if count<2: return None
     trend=bullish_averages(bars)
     if not trend: return None
-    last,previous=bars[-1],bars[-2]
-    lines=[]
-    for period in (5,10):
-        ma=trend['current'][period]
-        prior_ma=trend['previous'][period]
-        # During today's low tick, MA includes that low tick, not the later closing price.
-        low_tick_ma=round(__import__('math').fsum([*(b['close'] for b in bars[-period:-1]),last['low']])/period,10)
-        was_below=previous['close']<prior_ma
-        dipped_today=last['low']<low_tick_ma
-        if last['close']>ma and (was_below or dipped_today):
-            lines.append(dict(period=period,ma=ma,previousMA=prior_ma,previousClose=previous['close'],
-                priorBelow=was_below,intradayBelow=dipped_today))
-    return dict(count=count,lines=lines,trend=trend) if lines else None
+    last=bars[-1]
+    latest_limit=max(i for i,b in enumerate(bars[-20:],start=len(bars)-20) if b.get('limit')==1)
+    if latest_limit>=len(bars)-1 or last['close']<=trend['current'][20]: return None
+    if any(bars[i]['close']<sum(x['close'] for x in bars[i-19:i+1])/20 for i in range(latest_limit+1,len(bars))): return None
+    centers=[(b['high']+b['low']+b['close'])/3 for b in bars[-3:]]
+    if not centers[0]<centers[1]<centers[2]: return None
+    breaks=[]
+    for i in range(latest_limit+1,len(bars)):
+        if i<4: continue
+        dynamic_low_ma=round(__import__('math').fsum([*(b['close'] for b in bars[i-4:i]),bars[i]['low']])/5,10)
+        daily_ma5=sum(b['close'] for b in bars[i-4:i+1])/5
+        if bars[i]['low']<dynamic_low_ma or bars[i]['close']<daily_ma5:
+            breaks.append(i)
+    bias=(last['close']/trend['current'][5]-1)*100
+    reclaimed=any(any(bars[j]['close']>sum(b['close'] for b in bars[j-4:j+1])/5 for j in range(i,len(bars))) for i in breaks)
+    if not breaks or not reclaimed or not (last['close']>trend['current'][5] and 0<=bias<=5): return None
+    line=dict(period=5,ma=trend['current'][5],previousMA=trend['previous'][5],
+        breakDates=[bars[i]['date'] for i in breaks],bias=round(bias,4))
+    return dict(count=count,lines=[line],trend=trend,centers=centers,latestLimit=bars[latest_limit]['date'])
 
 
 def evaluate(bars):
@@ -186,16 +292,26 @@ def evaluate(bars):
             exit='收盘跌破防守位退出；冲高失去VWAP或量价转弱先减仓。')
     reclaim=reclaim_match(bars)
     if reclaim:
-        support=max(line['ma'] for line in reclaim['lines'])
-        labels='/'.join('MA'+str(line['period']) for line in reclaim['lines'])
+        support=reclaim['trend']['current'][5]
         event=next(b for b in reversed(bars[-20:]) if b.get('limit')==1)
-        record('pullback',event,min(last['low'],support*.99),[support*.99,support*1.01],
-            '重新站回'+labels+' · 待承接确认',
-            f"近20交易日累计{reclaim['count']}次涨停；MA5>MA10>MA20且三线均向上；"+'；'.join(
-                f"MA{x['period']}={x['ma']:.3f}，"+('昨日收盘在线下' if x['priorBelow'] else '当日盘中跌破')+'后当日重新站上'
-                for x in reclaim['lines']))
+        zone=[support,max(support,min(last['close'],support*1.025))]
+        stop=support*.99
+        prior_high=max(b['high'] for b in bars[-21:-1])
+        mean=reclaim['trend']['current'][20]
+        variance=sum((b['close']-mean)**2 for b in bars[-20:])/20
+        boll_upper=mean+2*variance**.5
+        targets=[x for x in (prior_high,boll_upper) if x>sum(zone)/2]
+        target=min(targets) if targets else max(prior_high,boll_upper,last['high'])
+        entry=sum(zone)/2
+        rr=(target-entry)/(entry-stop) if entry>stop else 0
+        record('pullback',event,stop,zone,
+            '日线满足 · 待分时与板块确认',
+            f"近20交易日累计{reclaim['count']}次涨停；回调收盘守住MA20；近3根K线重心上移；MA10>MA20且两线向上；回调曾破MA5后重新站回，当前MA5乖离{reclaim['lines'][0]['bias']:.2f}%")
         found['pullback'].update(limitCount20=reclaim['count'],reclaimLines=reclaim['lines'],
-            ruleVersion=PULLBACK_RULE_VERSION,signalDate=last['date'],bullishAverages=reclaim['trend'])
+            ruleVersion=PULLBACK_RULE_VERSION,signalDate=last['date'],bullishAverages=reclaim['trend'],
+            kCenters=[round(x,4) for x in reclaim['centers']],latestLimitDate=reclaim['latestLimit'],
+            entryRange=[round(x,3) for x in zone],stopPrice=round(stop,3),firstTarget=round(target,3),
+            rewardRisk=round(rr,2),recommendedPosition=0,action='观察')
     if last.get('amount',0)<=1e8:
         return found
     # Historical official limit status is independent of price adjustment.
@@ -254,6 +370,7 @@ def main():
     parser.add_argument('--previous')
     parser.add_argument('--mode', choices=('auto','auction','intraday','close'), default='auto')
     parser.add_argument('--pullback-only',action='store_true')
+    parser.add_argument('--cutoff',help='Intraday cutoff in China time, for example 14:30')
     args=parser.parse_args()
     output=Path(args.output).resolve()
     if output == ROOT or ROOT in output.parents:
@@ -334,6 +451,16 @@ def main():
             if len(bars)<35 or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]):
                 failures.append({'code':code,'name':universe[code],'reason':'日K、涨停状态或交易日期不完整，未冒充通过'})
                 continue
+            context={}
+            if mode=='intraday':
+                try:
+                    context=intraday_context(code,args.cutoff)
+                    if args.cutoff and context.get('quoteTime','')[11:16]==args.cutoff:
+                        bars[-1].update(open=context['sessionOpen'],high=context['sessionHigh'],low=context['sessionLow'],
+                            close=context['currentPrice'],volume=context['sessionVolume'],
+                            change=(context['currentPrice']/bars[-2]['close']-1)*100)
+                except Exception as error:
+                    context={'error':'分时或板块数据暂缺：'+str(error)}
             verified+=1
             result=evaluate(bars)
             for kind,item in result.items():
@@ -342,10 +469,13 @@ def main():
                     elif mode=='intraday':
                         item.update(status='盘中临时 · '+item['status'],provisional=True,volumeRatio=None)
                         item['confirmation']+='；盘中累计量不直接当作全天缩量'
+                    if kind=='pullback':
+                        apply_trade_plan(item,context,mode)
                     item['evaluatedAt']=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
                     groups[kind].append(dict(code=code,name=universe[code],**item))
         print('K-line progress:',min(start+5,len(codes)),'/',len(codes),flush=True)
     for values in groups.values(): values.sort(key=lambda r:(r['signalDate'],r['change']),reverse=True)
+    if 'pullback' in selected: enforce_portfolio_cap(groups['pullback'])
     if codes and not verified: raise RuntimeError('No verified daily K-lines; retaining previous snapshot')
     for kind in ('pullback','second','triple'):
         groups.setdefault(kind,[])
@@ -359,8 +489,8 @@ def main():
         source='东方财富妙想 mx-xuangu + mx-data',queries=queries,coverage=coverage,verified=verified,universe=len(codes),failures=failures,
         groupAsOf=group_dates,groupGeneratedAt=group_generated,groupStats=group_stats,ruleVersions=rule_versions,mode=mode,
         groups=groups,priceBasis='前复权日K；涨停采用妙想每日是否涨停字段确认，不用复权价格推算涨停。',
-        schedule='涨停回调策略工作日09:15竞价观察、14:40盘中查询；15:45收盘复核全策略（北京时间，后台排队可能延迟）。',
-        ruleVersion=PULLBACK_RULE_VERSION,limitations='涨停回调：沪深主板非ST、上市超过365天；近20交易日至少2次涨停；MA5>MA10>MA20且三线均向上；当日股价上穿MA5或MA10。09:15没有当日完整日K，只列昨日形态与竞价待确认；14:40为临时信号，收盘再复核。未自动交易或加入自选。')
+        schedule='涨停回调策略工作日09:20竞价观察、14:30盘中查询（北京时间，后台排队可能延迟）。',
+        ruleVersion=PULLBACK_RULE_VERSION,limitations='涨停回调：沪深主板非ST、上市超过365天；近20交易日至少2次涨停；回调守住MA20；近3根K线重心上移；MA10>MA20且两线向上；回调曾破MA5后重新站回，当前MA5乖离0%至5%。不再限制当日涨幅，不要求反包。09:20仅列昨日形态与竞价待确认；14:30为临时信号。未自动交易或加入自选。')
     output.parent.mkdir(parents=True,exist_ok=True)
     output.write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
     print('Private report ready; verified:',verified,'unavailable:',len(failures))

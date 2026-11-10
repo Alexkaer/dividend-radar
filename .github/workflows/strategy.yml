@@ -1,9 +1,8 @@
 name: Daily strategy screen
 on:
   schedule:
-    - cron: '15 1 * * 1-5'
-    - cron: '40 6 * * 1-5'
-    - cron: '45 7 * * 1-5'
+    - cron: '20 1 * * 1-5'
+    - cron: '30 6 * * 1-5'
   workflow_dispatch:
     inputs:
       mode:
@@ -15,6 +14,10 @@ on:
         description: '只更新涨停回调低吸'
         type: boolean
         default: false
+      cutoff:
+        description: '盘中截点（北京时间HH:MM；历史补发可用）'
+        type: string
+        required: false
 permissions:
   contents: write
 concurrency:
@@ -47,17 +50,18 @@ jobs:
           QUERY_SCHEDULE: ${{ github.event.schedule }}
           QUERY_MODE: ${{ inputs.mode || 'auto' }}
           PULLBACK_ONLY: ${{ inputs.pullback_only || false }}
+          QUERY_CUTOFF: ${{ inputs.cutoff || '' }}
         run: |
           umask 077
           mode="$QUERY_MODE"
           case "$QUERY_SCHEDULE" in
-            '15 1 * * 1-5') mode=auction ;;
-            '40 6 * * 1-5') mode=intraday ;;
-            '45 7 * * 1-5') mode=close ;;
+            '20 1 * * 1-5') mode=auction ;;
+            '30 6 * * 1-5') mode=intraday; QUERY_CUTOFF=14:30 ;;
           esac
           node scripts/encrypt_strategy.cjs --decrypt data/strategies.enc.json "$RUNNER_TEMP/previous-strategy.json"
           options=()
           if [ "$PULLBACK_ONLY" = 'true' ]; then options+=(--pullback-only); fi
+          if [ -n "$QUERY_CUTOFF" ]; then options+=(--cutoff "$QUERY_CUTOFF"); fi
           python scripts/strategy_screen.py --mode "$mode" --previous "$RUNNER_TEMP/previous-strategy.json" "${options[@]}" --output "$RUNNER_TEMP/private-strategy.json"
           rm "$RUNNER_TEMP/previous-strategy.json"
           if [ -f "$RUNNER_TEMP/private-strategy.json" ]; then

@@ -20,15 +20,16 @@ class StrategyTests(unittest.TestCase):
         bars=history()
         for i,b in enumerate(bars,1): b.update(close=8+i*.1,open=8+i*.1,high=8+i*.1+.2,low=8+i*.1-.1)
         for i in range(count): bars[-20+i]['limit']=1
-        bars[-2].update(close=11.5,low=11.4)
-        bars[-1].update(open=11.6,low=11.4,high=12.1,close=12,change=4.35)
+        bars[-3].update(open=11.3,low=11,high=11.5,close=11.4)
+        bars[-2].update(open=11.5,low=11.45,high=11.8,close=11.7)
+        bars[-1].update(open=11.8,low=11.7,high=12.1,close=12,change=2.56)
         return bars
 
     def test_at_least_two_limits_without_upper_cap(self):
         for count in (2,3,4,8):
             item=evaluate(self.reclaim_history(count))['pullback']
             self.assertEqual(item['limitCount20'],count)
-            self.assertEqual({x['period'] for x in item['reclaimLines']},{5,10})
+            self.assertEqual({x['period'] for x in item['reclaimLines']},{5})
         for count in (0,1): self.assertNotIn('pullback',evaluate(self.reclaim_history(count)))
 
     def test_mainboard_only_and_st_exclusions(self):
@@ -39,13 +40,13 @@ class StrategyTests(unittest.TestCase):
         for name in ('ST测试','*ST测试','ＳＴ测试','测试退'):
             self.assertFalse(pullback_security_allowed('600000',name))
 
-    def test_bullish_alignment_and_all_three_slopes_are_required(self):
+    def test_ma10_above_ma20_and_both_slopes_are_required(self):
         bars=self.reclaim_history()
         self.assertIsNotNone(bullish_averages(bars))
         flat=history();flat[-20]['limit']=flat[-18]['limit']=1
         flat[-1].update(low=9.8,close=10)
         self.assertIsNone(reclaim_match(flat))
-        falling=self.reclaim_history();falling[-21]['close']=12.5
+        falling=self.reclaim_history();falling[-21]['close']=14.5
         self.assertIsNone(reclaim_match(falling))
         wrong=self.reclaim_history()
         for b in wrong[-20:-5]: b['close']=14
@@ -56,9 +57,9 @@ class StrategyTests(unittest.TestCase):
         self.assertIn('pullback',evaluate(bars))
 
     def test_limits_outside_20_days_do_not_count_and_need_no_consecutive_boards(self):
-        bars=self.reclaim_history(2);bars[-19]['limit']=0;bars[-1]['limit']=1
+        bars=self.reclaim_history(2);bars[-19]['limit']=0;bars[-18]['limit']=1
         self.assertIsNotNone(reclaim_match(bars))
-        bars[-1]['limit']=0;bars[-21]['limit']=1
+        bars[-18]['limit']=0;bars[-21]['limit']=1
         self.assertIsNone(reclaim_match(bars))
 
     def test_touching_or_staying_above_is_not_reclaim(self):
@@ -71,18 +72,15 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNone(reclaim_match(bars))
 
     def test_intraday_breach_and_return_is_valid(self):
-        bars=self.reclaim_history();bars[-2]['close']=11.9
+        bars=self.reclaim_history()
         result=reclaim_match(bars)
-        self.assertTrue(all(x['intradayBelow'] and not x['priorBelow'] for x in result['lines']))
+        self.assertIn(bars[-3]['date'],result['lines'][0]['breakDates'])
 
-    def test_one_average_is_enough(self):
+    def test_ma5_bias_must_stay_within_five_percent(self):
         bars=self.reclaim_history(2)
-        bars[-2]['close']=11.6;bars[-1]['low']=11.6
-        result=reclaim_match(bars)
-        self.assertEqual([x['period'] for x in result['lines']],[5])
-        bars=self.reclaim_history(2)
-        bars[-1]['close']=11.65
-        self.assertEqual([x['period'] for x in reclaim_match(bars)['lines']],[10])
+        self.assertIsNotNone(reclaim_match(bars))
+        bars[-1].update(close=13,high=13.1)
+        self.assertIsNone(reclaim_match(bars))
 
     def test_unknown_limit_status_cannot_pass(self):
         bars=self.reclaim_history(2);del bars[-5]['limit']
@@ -91,7 +89,6 @@ class StrategyTests(unittest.TestCase):
     def test_auction_uses_previous_session_and_preserves_other_groups(self):
         bars=self.reclaim_history(2)
         for i,b in enumerate(bars): b['date']=(dt.date(2026,11,6)-dt.timedelta(days=39-i)).isoformat()
-        bars.append(dict(bars[-1],date='2026-11-09'))
         fixed=dt.datetime(2026,11,9,9,15,tzinfo=dt.timezone(dt.timedelta(hours=8)))
         fake_clock=SimpleNamespace(datetime=SimpleNamespace(now=lambda *args:fixed),timezone=dt.timezone,timedelta=dt.timedelta)
         preserved=dict(code='000002',name='fixture',signalDate='2026-11-04',change=1)

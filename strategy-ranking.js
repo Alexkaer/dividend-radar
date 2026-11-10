@@ -8,12 +8,12 @@
       for(const n of [5,10,20]){
         if(!finite(trend.current?.[n])||!finite(trend.previous?.[n])||!finite(item.close))return false;
         averages[n]=(trend.current[n]*n-item.close+price)/n;
-        if(averages[n]<=trend.previous[n])return false;
       }
-      if(!(averages[5]>averages[10]&&averages[10]>averages[20]))return false;
+      if(!(averages[10]>averages[20]&&averages[10]>trend.previous[10]&&averages[20]>trend.previous[20]))return false;
+      const bias=(price/averages[5]-1)*100;
+      if(!(price>averages[5]&&bias>=0&&bias<=5))return false;
     }
-    return !Array.isArray(item.reclaimLines)||item.reclaimLines.some(line=>
-      finite(line.ma)&&finite(line.period)&&finite(item.close)&&price>(line.ma*line.period-item.close+price)/line.period);
+    return true;
   }
   function quoteState(quote,now=Date.now()){
     if(!quote || !finite(quote.price) || quote.price<=0 || !finite(quote.change) || !finite(quote.time))return {valid:false,label:'行情缺失'};
@@ -37,7 +37,7 @@
     for(const [kind,items] of Object.entries(groups))for(const item of items){
       total++;
       const quote=quotes?.[item.code],state=quoteState(quote,now);
-      if(!state.valid || quote.change>=5 || quote.change<=-5 || quote.price<=item.invalidation || !finite(item.invalidation)||!Array.isArray(item.zone)||item.zone.length!==2||!item.zone.every(finite))continue;
+      if(!state.valid || quote.change<=-5 || quote.price<=item.invalidation || !finite(item.invalidation)||!Array.isArray(item.zone)||item.zone.length!==2||!item.zone.every(finite))continue;
       const referenceDate=typeof asOf==='object'?asOf[kind]:asOf;
       if(!referenceDate||state.date<referenceDate || (Date.parse(state.date)-Date.parse(referenceDate))/86400000>4)continue;
       // Today's upward cross cannot be inferred from yesterday's MA snapshot.
