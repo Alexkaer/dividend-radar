@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import strategy_screen as strategy
-from strategy_screen import evaluate, bars_from_tables, check_quota, QuotaExceeded, reclaim_match, pullback_security_allowed, bullish_averages
+from strategy_screen import evaluate, bars_from_tables, check_quota, QuotaExceeded, reclaim_match, pullback_security_allowed, bullish_averages, apply_trade_plan
 
 
 def history():
@@ -85,6 +85,14 @@ class StrategyTests(unittest.TestCase):
     def test_unknown_limit_status_cannot_pass(self):
         bars=self.reclaim_history(2);del bars[-5]['limit']
         self.assertIsNone(reclaim_match(bars))
+
+    def test_trade_plan_does_not_mark_price_above_rr_zone_as_buyable(self):
+        item=evaluate(self.reclaim_history(2))['pullback']
+        context=dict(currentPrice=item['firstTarget']*.99,vwap=item['entryRange'][0],aboveVwap=True,
+            volumeSignal={'ratio':2},sector='fixture',sectorChange=2)
+        apply_trade_plan(item,context,'intraday')
+        self.assertEqual(item['recommendedPosition'],0)
+        self.assertIn('不追',item['status'])
 
     def test_auction_uses_previous_session_and_preserves_other_groups(self):
         bars=self.reclaim_history(2)

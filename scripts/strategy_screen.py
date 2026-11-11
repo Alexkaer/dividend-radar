@@ -1,5 +1,6 @@
 """Private strategy builder. Never write plaintext reports inside the public repository."""
 import datetime as dt
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -70,6 +71,35 @@ def public_json(url):
         return json.load(response)
 
 
+def official_limit_count(row):
+    for key,value in row.items():
+        if 'DURATION_LIMIT_UP' in str(key):
+            return int(float(value))
+    return None
+
+
+def public_daily_bars(code,session):
+    secid=('1.' if code.startswith('6') else '0.')+code
+    url=('https://push2his.eastmoney.com/api/qt/stock/kline/get?secid='+secid+
+        '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59&klt=101&fqt=1&lmt=60&end='+session.replace('-',''))
+    rows=((public_json(url).get('data') or {}).get('klines') or [])
+    bars=[]
+    for raw in rows:
+        value=raw.split(',')
+        bars.append(dict(date=value[0],open=float(value[1]),close=float(value[2]),high=float(value[3]),low=float(value[4]),
+            volume=float(value[5]),amount=float(value[6]),change=float(value[8]),limit=0))
+    for i in range(1,len(bars)):
+        bars[i]['limit']=1 if bars[i]['close']/bars[i-1]['close']-1>=.095 else 0
+    return bars
+
+
+def public_trading_session(day):
+    data=(public_json('https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=1.000001&'
+        'fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58&ndays=1&iscr=0&iscca=0').get('data') or {})
+    trends=data.get('trends') or []
+    return bool(trends and str(trends[-1]).startswith(day))
+
+
 def sector_changes():
     global _SECTOR_CHANGES
     if _SECTOR_CHANGES is None:
@@ -126,18 +156,22 @@ def apply_trade_plan(item,context,mode):
     ma5=item['bullishAverages']['current'][5]
     price=context.get('currentPrice',item['close'])
     lower=max(ma5,context.get('vwap',ma5))
-    upper=min(price,ma5*1.025)
-    if upper<lower: lower,upper=ma5,ma5*1.025
-    stop=ma5*.99; target=item['firstTarget']; entry=(lower+upper)/2
+    stop=ma5*.99; target=item['firstTarget']
+    rr_ceiling=(target+2*stop)/3
+    upper=min(price,ma5*1.05,rr_ceiling)
+    executable=upper>=lower
+    if not executable: upper=lower
+    entry=(lower+upper)/2
     rr=(target-entry)/(entry-stop) if entry>stop else 0
     sector_change=context.get('sectorChange')
     confirmed=(mode=='intraday' and context.get('aboveVwap') and context.get('volumeSignal') and
-        sector_change is not None and sector_change>0 and rr>=2)
+        sector_change is not None and sector_change>0 and executable and lower<=price<=upper and rr>=2)
     position=10 if confirmed and sector_change>=1.5 else 5 if confirmed else 0
     item.update(entryRange=[round(lower,3),round(upper,3)],invalidation=round(stop,3),stopPrice=round(stop,3),
         rewardRisk=round(rr,2),recommendedPosition=position,
         action='A+可上车' if position==10 else 'A类可上车' if position==5 else '观察/等条件',
-        status=('盘中确认 · 可按区间低吸' if position else '日线满足 · 分时/板块/盈亏比未全部确认'))
+        status=('盘中确认 · 可按区间低吸' if position else
+            '价格高于满足2:1盈亏比的区间 · 不追' if price>upper else '日线满足 · 分时/板块/盈亏比未全部确认'))
     item['confirmation']=(f"行业{context.get('sector','未知')}"
         +(f" {sector_change:+.2f}%" if sector_change is not None else '涨幅未知')+
         ('；价格在VWAP上方' if context.get('aboveVwap') else '；价格未站稳VWAP')+
@@ -259,7 +293,8 @@ def reclaim_match(bars):
     latest_limit=max(i for i,b in enumerate(bars[-20:],start=len(bars)-20) if b.get('limit')==1)
     if latest_limit>=len(bars)-1 or last['close']<=trend['current'][20]: return None
     if any(bars[i]['close']<sum(x['close'] for x in bars[i-19:i+1])/20 for i in range(latest_limit+1,len(bars))): return None
-    centers=[(b['high']+b['low']+b['close'])/3 for b in bars[-3:]]
+    center_bars=bars[-4:-1] if bars[-1].get('partial') else bars[-3:]
+    centers=[(b['high']+b['low']+b['close'])/3 for b in center_bars]
     if not centers[0]<centers[1]<centers[2]: return None
     breaks=[]
     for i in range(latest_limit+1,len(bars)):
@@ -395,6 +430,11 @@ def main():
         print('MX date query returned no historical date table; trying explicit security query.',flush=True)
     if not dates: raise RuntimeError('No validated market session date; retaining original snapshot')
     session=max(dates)
+    if mode=='intraday' and session!=today:
+        try:
+            if public_trading_session(today): session=today
+        except Exception:
+            pass
     if mode!='auction' and session != today:
         print('No current trading session; previous snapshot retained.')
         return
@@ -407,7 +447,7 @@ def main():
     group_stats=previous.get('groupStats',{k:dict(verified=previous.get('verified',0),universe=previous.get('universe',0),
         failures=previous.get('failures',[]),mode='close') for k in groups}).copy()
     rule_versions=previous.get('ruleVersions',{}).copy()
-    universe={}; membership={}
+    universe={}; membership={}; official_counts={}
     selected=('pullback',) if partial else tuple(QUERIES)
     for kind in selected:
         query=QUERIES[kind]
@@ -420,45 +460,60 @@ def main():
             if kind=='pullback' and not pullback_security_allowed(code,row.get('SECURITY_SHORT_NAME','')): continue
             universe[code]=row.get('SECURITY_SHORT_NAME',code)
             membership.setdefault(code,set()).add(kind)
+            if kind=='pullback': official_counts[code]=official_limit_count(row)
         groups[kind]=[]
         print(kind, 'broad candidates:',len(rows),'complete:',coverage[kind]['complete'],flush=True)
     codes=sorted(universe); failures=[]; verified=0
+    public_bars={}
+    if selected==('pullback',) and codes and all(official_counts.get(code) is not None for code in codes):
+        def load_public(code):
+            try: return code,public_daily_bars(code,session)
+            except Exception: return code,[]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            public_bars=dict(executor.map(load_public,codes))
     for start in range(0,len(codes),5):
         batch=codes[start:start+5]
         # MX's explicit "前复权" wording can resolve to fixed-base close for only
         # one entity. Ordinary daily OHLC resolves all entities; the parser still
         # strictly requires AdjustFlag=1 metadata for every accepted price field.
-        query='、'.join(batch)+'分别最近40个交易日每日开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回每只股票代码和交易日期'
-        try:
-            blocks=tables(api('query',query,cache_slot))
-        except QuotaExceeded:
-            raise
-        except RuntimeError:
-            blocks=[]
+        blocks=[]
+        if not public_bars:
+            query='、'.join(batch)+'分别最近40个交易日每日开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回每只股票代码和交易日期'
+            try:
+                blocks=tables(api('query',query,cache_slot))
+            except QuotaExceeded:
+                raise
+            except RuntimeError:
+                blocks=[]
         for code in batch:
-            bars=bars_from_tables(blocks,code)
+            bars=public_bars.get(code) if public_bars else bars_from_tables(blocks,code)
             bars=[b for b in bars if b['date']<=session]
-            if len(bars)<35 or not bars or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]):
+            count_matches=(not public_bars or (official_counts.get(code) is not None and
+                sum(b.get('limit')==1 for b in bars[-20:])==official_counts[code]))
+            if len(bars)<35 or not bars or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]) or not count_matches:
                 # MX occasionally omits an entity in multi-stock queries; retry it alone.
-                single=code+str(universe[code])+'最近40个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回交易日期'
-                try:
-                    bars=bars_from_tables(tables(api('query',single,cache_slot)),code)
-                    bars=[b for b in bars if b['date']<=session]
-                except QuotaExceeded:
-                    raise
-                except RuntimeError:
-                    bars=[]
-            if len(bars)<35 or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]):
-                failures.append({'code':code,'name':universe[code],'reason':'日K、涨停状态或交易日期不完整，未冒充通过'})
+                if not public_bars:
+                    single=code+str(universe[code])+'最近40个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回交易日期'
+                    try:
+                        bars=bars_from_tables(tables(api('query',single,cache_slot)),code)
+                        bars=[b for b in bars if b['date']<=session]
+                    except QuotaExceeded:
+                        raise
+                    except RuntimeError:
+                        bars=[]
+            count_matches=(not public_bars or (official_counts.get(code) is not None and
+                sum(b.get('limit')==1 for b in bars[-20:])==official_counts[code]))
+            if len(bars)<35 or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]) or not count_matches:
+                failures.append({'code':code,'name':universe[code],'reason':'前复权日K、涨停次数或交易日期交叉校验不完整，未冒充通过'})
                 continue
             context={}
             if mode=='intraday':
                 try:
                     context=intraday_context(code,args.cutoff)
-                    if args.cutoff and context.get('quoteTime','')[11:16]==args.cutoff:
+                    if context.get('quoteTime') and (not args.cutoff or context.get('quoteTime','')[11:16]==args.cutoff):
                         bars[-1].update(open=context['sessionOpen'],high=context['sessionHigh'],low=context['sessionLow'],
                             close=context['currentPrice'],volume=context['sessionVolume'],
-                            change=(context['currentPrice']/bars[-2]['close']-1)*100)
+                            change=(context['currentPrice']/bars[-2]['close']-1)*100,partial=True)
                 except Exception as error:
                     context={'error':'分时或板块数据暂缺：'+str(error)}
             verified+=1
@@ -486,7 +541,7 @@ def main():
         group_stats[kind]=dict(verified=verified,universe=len(codes),failures=failures,mode=mode)
     if 'pullback' in selected: rule_versions['pullback']=PULLBACK_RULE_VERSION
     report=dict(version=1,asOf=session,generatedAt=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(),
-        source='东方财富妙想 mx-xuangu + mx-data',queries=queries,coverage=coverage,verified=verified,universe=len(codes),failures=failures,
+        source='东方财富妙想 mx-xuangu宽筛 + 东方财富公开前复权行情API交叉复核',queries=queries,coverage=coverage,verified=verified,universe=len(codes),failures=failures,
         groupAsOf=group_dates,groupGeneratedAt=group_generated,groupStats=group_stats,ruleVersions=rule_versions,mode=mode,
         groups=groups,priceBasis='前复权日K；涨停采用妙想每日是否涨停字段确认，不用复权价格推算涨停。',
         schedule='涨停回调策略工作日09:20竞价观察、14:30盘中查询（北京时间，后台排队可能延迟）。',
