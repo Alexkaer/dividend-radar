@@ -541,7 +541,7 @@ def public_ma_pullback(previous, mode, selected=('maPullback',)):
                 if (kind=='second' and code not in flags) or (kind=='triple' and code not in triple_codes):
                     continue
                 age_limit=(dt.date.fromisoformat(session)-dt.timedelta(days=366)).isoformat()
-                if tencent_daily(symbol,age_limit,1):
+                if tencent_daily(symbol,age_limit,5):
                     item=candidates[kind]
                     item.update(code=code,name=name,provisional=mode!='close')
                     if mode=='auction': item['status']='竞价观察 · '+item['status']
