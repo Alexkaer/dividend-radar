@@ -120,7 +120,7 @@ def public_snapshot(previous):
     as_of=next((row['date'] for row in indices if row['code']=='000001'),None)
     if as_of!=day or not any(row['code']=='399001' and row['date']==day for row in indices):
         raise ValueError('Public index closing date could not be verified')
-    if previous['asOf']>=as_of:return previous
+    if previous['asOf']>as_of:return previous
     data={**previous,'asOf':as_of,'updatedAt':now.isoformat(),'session':'公开收盘快照',
         'indices':[row for row in indices if row['date']==as_of]}
     notes=['指数来自腾讯公开日K']
@@ -143,7 +143,19 @@ def public_snapshot(previous):
     except (OSError,ValueError,KeyError,TypeError,RuntimeError):
         data['limits']=dict(up=None,down=None,scope='当日涨跌停池暂不可用')
         data['sentiment']=dict(label='待判断',score=None)
-    notes.append('成交额与行业榜保留各自原日期')
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        sh=pool.submit(kline,'1.000001',12)
+        sz=pool.submit(kline,'0.399001',12)
+        sectors=pool.submit(sector_ranking,as_of)
+        try:
+            data['turnover']=turnover_summary(sh.result(),sz.result(),as_of)
+            notes.append('成交额来自东方财富')
+        except Exception:
+            notes.append('成交额保留原日期')
+        try:
+            data['sectors']=sectors.result()
+        except Exception:
+            notes.append('行业榜保留原日期')
     data['partialSource']='。'.join(notes)+'。'
     return data
 

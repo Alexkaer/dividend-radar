@@ -44,7 +44,7 @@
 
   let current=null,busy=false;
   async function refresh(){if(busy)return;busy=true;$('refreshMarket').disabled=true;$('refreshMarket').textContent='↻ 正在刷新…';
-    try{const d=await window.RadarLive.refreshMarket(current,message=>{$('marketState').textContent=message});render(d);current=d;window.RadarLive.cache.put('market',d)}
+    try{const d=await window.RadarLive.refreshMarket(current,message=>{$('marketState').textContent=message});if(current&&d.asOf<current.asOf){render(current);return;}render(d);current=d;window.RadarLive.cache.put('market',d)}
     catch(error){$('marketState').textContent='刷新失败 · 保留上次数据';$('marketAlert').textContent=error.message+'。当前仍为上次有效快照，可点击刷新重试。';}
     finally{busy=false;$('refreshMarket').disabled=false;$('refreshMarket').textContent='↻ 刷新数据';}}
   $('refreshMarket').onclick=refresh;
