@@ -48,5 +48,17 @@
     catch(error){$('marketState').textContent='刷新失败 · 保留上次数据';$('marketAlert').textContent=error.message+'。当前仍为上次有效快照，可点击刷新重试。';}
     finally{busy=false;$('refreshMarket').disabled=false;$('refreshMarket').textContent='↻ 刷新数据';}}
   $('refreshMarket').onclick=refresh;
-  (async()=>{let cached=window.RadarLive.cache.get('market');if(cached){try{render(cached);current=cached}catch{cached=null}}if(!cached){try{const r=await fetch('./data/market.json',{cache:'no-store'});if(!r.ok)throw Error();const d=await r.json();render(d);current=d}catch{}}refresh()})();
+  (async()=>{
+    const cached=window.RadarLive.cache.get('market');
+    if(cached){try{render(cached);current=cached}catch{}}
+    try{
+      const response=await fetch('./data/market.json',{cache:'no-store'});
+      if(!response.ok)throw Error('快照暂不可用');
+      const published=await response.json();
+      if(!current||published.asOf>current.asOf||published.asOf===current.asOf&&Date.parse(published.updatedAt)>Date.parse(current.updatedAt)){
+        render(published);current=published;
+      }
+    }catch{}
+    refresh();
+  })();
 })();

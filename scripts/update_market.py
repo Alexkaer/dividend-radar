@@ -5,8 +5,10 @@ from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor
 try:
     from .update_data import fetch, closing_quotes, ROOT, number
+    from .strategy_screen import tencent_daily
 except ImportError:
     from update_data import fetch, closing_quotes, ROOT, number
+    from strategy_screen import tencent_daily
 
 INDICES=[('1.000001','上证指数'),('0.399001','深证成指'),('0.399006','创业板指'),('1.000688','科创50'),('1.000300','沪深300'),('0.899050','北证50'),('1.000016','上证50'),('1.000905','中证500')]
 
@@ -76,7 +78,7 @@ def sector_ranking(as_of):
     with ThreadPoolExecutor(max_workers=4) as pool: today=list(pool.map(daily_verify,sorted([r for r in rows if number(r.get('f3')) is not None],key=lambda r:r['f3'],reverse=True)[:15]))
     return dict(items=top,todayItems=today,universe=d['total'],scope='东方财富行业板块（含不同层级，可能存在重叠），不含概念板块；当日与5日榜各前15，分别用日K核对。')
 
-def main():
+def full_snapshot():
     now=datetime.now(ZoneInfo('Asia/Shanghai'));quotes=closing_quotes()
     as_of=datetime.fromtimestamp(max(q['f124'] for q in quotes.values()),ZoneInfo('Asia/Shanghai')).date().isoformat()
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -91,7 +93,78 @@ def main():
         volumes=turnover_summary(sh_future.result(),sz_future.result(),as_of);limits=limit_future.result();sectors=sector_future.result()
     b=breadth(quotes)
     data=dict(updatedAt=now.isoformat(),asOf=as_of,session='收盘快照',indices=indices,breadth=b,limits=limits,sentiment=sentiment(b,limits,indices),turnover=volumes,sectors=sectors,source='东方财富指数行情、全A股估值行情、涨跌停股池及行业指数')
-    target=ROOT/'data/market.json';tmp=target.with_suffix('.tmp');tmp.write_text(json.dumps(data,ensure_ascii=False,separators=(',',':')),encoding='utf-8');tmp.replace(target)
-    print(f'Market {as_of}: {b["up"]} up / {b["down"]} down; limit pools {limits["up"]}/{limits["down"]}; {len(indices)} indices; 10 turnover sessions; 15 verified sectors')
+    return data
+
+
+def public_snapshot(previous):
+    now=datetime.now(ZoneInfo('Asia/Shanghai'))
+    day=now.date().isoformat()
+    if now.hour<15:
+        return previous
+    def public_index(item):
+        secid,name=item
+        market,code=secid.split('.')
+        symbol=('sh' if market=='1' else 'sz')+code
+        rows=sorted(tencent_daily(symbol,day,5).items())
+        if len(rows)<2:return None
+        (prior,previous_close),(date,close)=rows[-2:]
+        return dict(code=code,name=name,date=date,close=float(close),change=float((close/previous_close-1)*100))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        jobs=[pool.submit(public_index,item) for item in INDICES]
+    indices=[]
+    for job in jobs:
+        try:
+            row=job.result()
+            if row:indices.append(row)
+        except (OSError,ValueError,KeyError,ArithmeticError,TypeError): pass
+    as_of=next((row['date'] for row in indices if row['code']=='000001'),None)
+    if as_of!=day or not any(row['code']=='399001' and row['date']==day for row in indices):
+        raise ValueError('Public index closing date could not be verified')
+    if previous['asOf']>=as_of:return previous
+    data={**previous,'asOf':as_of,'updatedAt':now.isoformat(),'session':'公开收盘快照',
+        'indices':[row for row in indices if row['date']==as_of]}
+    notes=['指数来自腾讯公开日K']
+    try:
+        base='https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/'
+        total=int(fetch(base+'Market_Center.getHQNodeStockCount',dict(node='hs_a')))
+        def page(i):
+            return fetch(base+'Market_Center.getHQNodeData',dict(node='hs_a',num=100,page=i,sort='symbol',asc=1))
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            rows={r['code']:dict(f2=r['trade'],f3=r['changepercent']) for part in pool.map(page,range(1,(total+99)//100+1)) for r in part}
+        if len(rows)!=total or total<4500:raise ValueError('Sina market coverage incomplete')
+        data['breadth']=breadth(rows)
+        notes.append('市场广度来自新浪')
+    except (OSError,ValueError,KeyError,TypeError,RuntimeError):
+        data['breadth']=dict(up=None,down=None,flat=None,total=0,advanceShare=None)
+        notes.append('市场广度暂不可用')
+    try:
+        data['limits']=pools(as_of)
+        data['sentiment']=sentiment(data['breadth'],data['limits'],data['indices'])
+    except (OSError,ValueError,KeyError,TypeError,RuntimeError):
+        data['limits']=dict(up=None,down=None,scope='当日涨跌停池暂不可用')
+        data['sentiment']=dict(label='待判断',score=None)
+    notes.append('成交额与行业榜保留各自原日期')
+    data['partialSource']='。'.join(notes)+'。'
+    return data
+
+
+def main():
+    import argparse
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--public-only',action='store_true')
+    args=parser.parse_args()
+    target=ROOT/'data/market.json'
+    previous=json.loads(target.read_text(encoding='utf-8'))
+    try:
+        data=public_snapshot(previous) if args.public_only else full_snapshot()
+        today=datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()
+        if data['asOf']!=today: data=public_snapshot(previous)
+    except Exception:
+        if args.public_only:raise
+        data=public_snapshot(previous)
+    tmp=target.with_suffix('.tmp')
+    tmp.write_text(json.dumps(data,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
+    tmp.replace(target)
+    print(f'Market {data["asOf"]}: {len(data["indices"])} indices; {data.get("partialSource","full snapshot")}')
 
 if __name__=='__main__': main()

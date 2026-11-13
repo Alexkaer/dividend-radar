@@ -60,10 +60,15 @@ jobs:
           echo '::warning::Refresh failed. Publishing last valid snapshot with its original timestamp.'
           test -f data/stocks.json
       - name: Refresh closing market overview
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
         id: market_refresh
         continue-on-error: true
-        run: python scripts/update_market.py
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            python scripts/update_market.py --public-only
+          else
+            python scripts/update_market.py
+          fi
       - name: Preserve last valid market snapshot on failure
         if: steps.market_refresh.outcome == 'failure'
         run: |
