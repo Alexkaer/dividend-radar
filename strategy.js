@@ -57,10 +57,10 @@
   async function load(requestEpoch, onlyIfChanged=false){
     const response=await fetch(new URL('data/strategies.json',location.href),{cache:'no-store',credentials:'omit'});
     if(!response.ok)throw Error('snapshot');
-    const value=await response.json();
-    if(value.version!==1||!value.groups||!value.generatedAt)throw Error('format');
-    const fingerprint=value.generatedAt;
+    const fingerprint=await response.text();
     if(requestEpoch!==epoch||(onlyIfChanged&&fingerprint===snapshotFingerprint))return false;
+    const value=JSON.parse(fingerprint);
+    if(value.version!==1||!value.groups||!value.generatedAt)throw Error('format');
     report=value;
     snapshotFingerprint=fingerprint;
     legacyPullback=report.ruleVersions?.pullback!==pullbackVersion;
