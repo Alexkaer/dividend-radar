@@ -2,6 +2,17 @@
   'use strict';
   const finite=x=>typeof x==='number'&&Number.isFinite(x);
   const round=x=>Math.round(x*100)/100;
+  function maPullbackQuote(item,quote,state,referenceDate){
+    if(!state.valid)return {ratio:null,label:'最新价待校验'};
+    if(state.date!==referenceDate)return {ratio:null,label:'跨日行情 · 等待当日策略复核'};
+    const price=Math.round(quote.price*100),stop=Math.round(item.stopPrice*100),target=Math.round(item.firstTarget*100);
+    if(price<=stop)return {ratio:null,label:'已触及MA20止损位'};
+    if(price>=target)return {ratio:null,label:'已触及MA5初步止盈位'};
+    const ratio=(target-price)/(price-stop);
+    if(quote.price>=item.latestLimitClose)return {ratio,label:'最新价已回到涨停日收盘价'};
+    if(price<Math.round(item.entryRange[0]*100)||target-price<2*(price-stop))return {ratio,label:'最新价不在计划买入区间'};
+    return {ratio,eligible:true,label:'回调观察 · 最新盈亏比达标'};
+  }
   function stillReclaimed(item,price){
     if(item.bullishAverages){
       const trend=item.bullishAverages,averages={};
@@ -40,6 +51,7 @@
       if(!state.valid || quote.change<=-5 || quote.price<=item.invalidation || !finite(item.invalidation)||!Array.isArray(item.zone)||item.zone.length!==2||!item.zone.every(finite))continue;
       const referenceDate=typeof asOf==='object'?asOf[kind]:asOf;
       if(!referenceDate||state.date<referenceDate || (Date.parse(state.date)-Date.parse(referenceDate))/86400000>4)continue;
+      if(kind==='maPullback'&&!maPullbackQuote(item,quote,state,referenceDate).eligible)continue;
       // Today's upward cross cannot be inferred from yesterday's MA snapshot.
       if(kind==='pullback'&&item.bullishAverages&&state.date!==referenceDate)continue;
       if(kind==='pullback'&&!stillReclaimed(item,quote.price))continue;
@@ -65,5 +77,5 @@
     const ranked=[...candidates.values()].sort((a,b)=>b.score-a.score||a.risk-b.risk||a.code.localeCompare(b.code));
     return {top:ranked.slice(0,5),eligible:ranked.length,total};
   }
-  const api={rank,quoteState,stillReclaimed};if(typeof module==='object'&&module.exports)module.exports=api;else root.StrategyRanking=api;
+  const api={rank,quoteState,stillReclaimed,maPullbackQuote};if(typeof module==='object'&&module.exports)module.exports=api;else root.StrategyRanking=api;
 })(typeof window!=='undefined'?window:globalThis);

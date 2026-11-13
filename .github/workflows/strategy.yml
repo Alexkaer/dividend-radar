@@ -14,6 +14,10 @@ on:
         description: '只更新涨停回调低吸'
         type: boolean
         default: false
+      ma_pullback_only:
+        description: '只更新涨停回调 · MA20止损'
+        type: boolean
+        default: false
       cutoff:
         description: '盘中截点（北京时间HH:MM；历史补发可用）'
         type: string
@@ -50,6 +54,7 @@ jobs:
           QUERY_SCHEDULE: ${{ github.event.schedule }}
           QUERY_MODE: ${{ inputs.mode || 'auto' }}
           PULLBACK_ONLY: ${{ inputs.pullback_only || false }}
+          MA_PULLBACK_ONLY: ${{ inputs.ma_pullback_only || false }}
           QUERY_CUTOFF: ${{ inputs.cutoff || '' }}
         run: |
           umask 077
@@ -61,6 +66,7 @@ jobs:
           node scripts/encrypt_strategy.cjs --decrypt data/strategies.enc.json "$RUNNER_TEMP/previous-strategy.json"
           options=()
           if [ "$PULLBACK_ONLY" = 'true' ]; then options+=(--pullback-only); fi
+          if [ "$MA_PULLBACK_ONLY" = 'true' ]; then options+=(--ma-pullback-only); fi
           if [ -n "$QUERY_CUTOFF" ]; then options+=(--cutoff "$QUERY_CUTOFF"); fi
           python scripts/strategy_screen.py --mode "$mode" --previous "$RUNNER_TEMP/previous-strategy.json" "${options[@]}" --output "$RUNNER_TEMP/private-strategy.json"
           rm "$RUNNER_TEMP/previous-strategy.json"

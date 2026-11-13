@@ -1,6 +1,7 @@
 """Private strategy builder. Never write plaintext reports inside the public repository."""
 import datetime as dt
 import concurrent.futures
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ CACHE = Path(tempfile.gettempdir()) / 'dividend-strategy-private-cache'
 PULLBACK_RULE_VERSION = '2026-11-10-mainboard-reclaim-v4'
 QUERIES = {
     'pullback': '沪深主板A股，非ST，非创业板，非科创板，非北交所，上市天数大于365天，最近20个交易日内涨停次数大于等于2次',
+    'maPullback': 'A股，最近20个交易日内涨停次数大于等于2次',
     'second': 'A股，非ST，上市天数大于365天，最近30个交易日内连续涨停天数大于等于2天，今日涨跌幅小于5%，今日成交额大于1亿元',
     'triple': 'A股，非ST，上市天数大于365天，最近5个交易日内成交量环比增长率大于等于200%出现次数大于0，最近5个交易日内当日涨幅大于3%出现次数大于0，今日成交额大于1亿元',
 }
@@ -311,10 +313,37 @@ def reclaim_match(bars):
     return dict(count=count,lines=[line],trend=trend,centers=centers,latestLimit=bars[latest_limit]['date'])
 
 
+def ma_pullback_plan(bars):
+    window = bars[-20:]
+    if len(window) < 20 or any(b.get('limit') not in (0, 1) for b in window):
+        return None
+    limits = [b for b in window if b['limit'] == 1]
+    last = window[-1]
+    if len(limits) < 2 or last['limit'] == 1 or last['close'] >= limits[-1]['close']:
+        return None
+
+    closes = [Decimal(str(b['close'])) for b in window]
+    ma20 = sum(closes) / 20
+    stop = int((ma20 * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    target = int((sum(closes[-5:]) / 5 * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    price = closes[-1] * 100
+    entry_min = max(stop, int(ma20 * 100)) + 1
+    pullback_ceiling = int((Decimal(str(limits[-1]['close'])) * 100).to_integral_value(rounding=ROUND_CEILING)) - 1
+    entry_max = min((target + 2 * stop) // 3, pullback_ceiling)
+    if not (entry_min <= price <= entry_max):
+        return None
+    ratio = (target - price) / (price - stop)
+    return limits[-1], dict(
+        limitCount20=len(limits), latestLimitClose=limits[-1]['close'],
+        stopPrice=stop / 100, firstTarget=target / 100, rewardRisk=float(ratio),
+        entryRange=[entry_min / 100, entry_max / 100],
+    )
+
+
 def evaluate(bars):
     """Mechanical closing-bar checks only; intraday/sector acceptance remains unknown."""
     found = {}
-    if len(bars) < 35:
+    if not bars:
         return found
     last = bars[-1]
     def intact(low, start):
@@ -325,6 +354,15 @@ def evaluate(bars):
             volumeRatio=round(last['volume']/event['volume'],4) if event['volume']>0 else None,
             confirmation='分时VWAP、板块强度与指定时段承接未查询；完成日线条件不等于买入信号',
             exit='收盘跌破防守位退出；冲高失去VWAP或量价转弱先减仓。')
+    plan = ma_pullback_plan(bars)
+    if plan:
+        event, levels = plan
+        record('maPullback', event, levels['stopPrice'], levels['entryRange'],
+            '回调观察 · 快照盈亏比达标',
+            f"近20日{levels['limitCount20']}次涨停；低于最近涨停日收盘价 {event['close']:.2f}")
+        found['maPullback'].update(levels, exit='触及MA20参考价止损；MA5参考价为初步止盈位。')
+    if len(bars) < 35:
+        return found
     reclaim=reclaim_match(bars)
     if reclaim:
         support=reclaim['trend']['current'][5]
@@ -404,7 +442,9 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--previous')
     parser.add_argument('--mode', choices=('auto','auction','intraday','close'), default='auto')
-    parser.add_argument('--pullback-only',action='store_true')
+    selection=parser.add_mutually_exclusive_group()
+    selection.add_argument('--pullback-only',action='store_true')
+    selection.add_argument('--ma-pullback-only',action='store_true')
     parser.add_argument('--cutoff',help='Intraday cutoff in China time, for example 14:30')
     args=parser.parse_args()
     output=Path(args.output).resolve()
@@ -438,7 +478,7 @@ def main():
     if mode!='auction' and session != today:
         print('No current trading session; previous snapshot retained.')
         return
-    partial=args.pullback_only or mode!='close'
+    partial=args.pullback_only or args.ma_pullback_only or mode!='close'
     groups=previous.get('groups',{}).copy() if partial else {}
     coverage=previous.get('coverage',{}).copy() if partial else {}
     queries=previous.get('queries',{}).copy() if partial else {}
@@ -448,7 +488,12 @@ def main():
         failures=previous.get('failures',[]),mode='close') for k in groups}).copy()
     rule_versions=previous.get('ruleVersions',{}).copy()
     universe={}; membership={}; official_counts={}
-    selected=('pullback',) if partial else tuple(QUERIES)
+    if args.ma_pullback_only:
+        selected=('maPullback',)
+    elif args.pullback_only:
+        selected=('pullback',)
+    else:
+        selected=('pullback','maPullback') if partial else tuple(QUERIES)
     for kind in selected:
         query=QUERIES[kind]
         if mode=='auction': query=query.replace('今日成交额','最近一个完整交易日成交额').replace('最近20个交易日内','截至最近一个完整交易日的最近20个交易日内')
@@ -464,21 +509,24 @@ def main():
         groups[kind]=[]
         print(kind, 'broad candidates:',len(rows),'complete:',coverage[kind]['complete'],flush=True)
     codes=sorted(universe); failures=[]; verified=0
+    verified_codes=set()
     public_bars={}
-    if selected==('pullback',) and codes and all(official_counts.get(code) is not None for code in codes):
+    public_codes=[code for code in codes if membership[code]=={'pullback'} and official_counts.get(code) is not None]
+    if public_codes:
         def load_public(code):
             try: return code,public_daily_bars(code,session)
             except Exception: return code,[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-            public_bars=dict(executor.map(load_public,codes))
+            public_bars=dict(executor.map(load_public,public_codes))
     for start in range(0,len(codes),5):
         batch=codes[start:start+5]
         # MX's explicit "前复权" wording can resolve to fixed-base close for only
         # one entity. Ordinary daily OHLC resolves all entities; the parser still
         # strictly requires AdjustFlag=1 metadata for every accepted price field.
         blocks=[]
-        if not public_bars:
-            query='、'.join(batch)+'分别最近40个交易日每日开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回每只股票代码和交易日期'
+        mx_batch=[code for code in batch if code not in public_bars]
+        if mx_batch:
+            query='、'.join(mx_batch)+'分别最近40个交易日每日开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回每只股票代码和交易日期'
             try:
                 blocks=tables(api('query',query,cache_slot))
             except QuotaExceeded:
@@ -486,13 +534,15 @@ def main():
             except RuntimeError:
                 blocks=[]
         for code in batch:
-            bars=public_bars.get(code) if public_bars else bars_from_tables(blocks,code)
+            use_public=code in public_bars
+            required_bars=20 if membership[code]=={'maPullback'} else 35
+            bars=public_bars[code] if use_public else bars_from_tables(blocks,code)
             bars=[b for b in bars if b['date']<=session]
-            count_matches=(not public_bars or (official_counts.get(code) is not None and
+            count_matches=(not use_public or (official_counts.get(code) is not None and
                 sum(b.get('limit')==1 for b in bars[-20:])==official_counts[code]))
-            if len(bars)<35 or not bars or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]) or not count_matches:
+            if len(bars)<required_bars or bars[-1]['date']!=session or not all('limit' in b for b in bars[-required_bars:]) or not count_matches:
                 # MX occasionally omits an entity in multi-stock queries; retry it alone.
-                if not public_bars:
+                if not use_public:
                     single=code+str(universe[code])+'最近40个交易日每日前复权开盘价、最高价、最低价、收盘价、成交量、成交额、涨跌幅、是否涨停，返回交易日期'
                     try:
                         bars=bars_from_tables(tables(api('query',single,cache_slot)),code)
@@ -501,9 +551,9 @@ def main():
                         raise
                     except RuntimeError:
                         bars=[]
-            count_matches=(not public_bars or (official_counts.get(code) is not None and
+            count_matches=(not use_public or (official_counts.get(code) is not None and
                 sum(b.get('limit')==1 for b in bars[-20:])==official_counts[code]))
-            if len(bars)<35 or bars[-1]['date']!=session or not all('limit' in b for b in bars[-35:]) or not count_matches:
+            if len(bars)<required_bars or bars[-1]['date']!=session or not all('limit' in b for b in bars[-required_bars:]) or not count_matches:
                 failures.append({'code':code,'name':universe[code],'reason':'前复权日K、涨停次数或交易日期交叉校验不完整，未冒充通过'})
                 continue
             context={}
@@ -517,10 +567,13 @@ def main():
                 except Exception as error:
                     context={'error':'分时或板块数据暂缺：'+str(error)}
             verified+=1
+            verified_codes.add(code)
             result=evaluate(bars)
             for kind,item in result.items():
                 if kind in membership[code]:
-                    if mode=='auction': item.update(status='竞价观察 · 昨日收复，今日待确认',provisional=True)
+                    if mode=='auction':
+                        status='竞价观察 · 上一交易日回调，今日待确认' if kind=='maPullback' else '竞价观察 · 昨日收复，今日待确认'
+                        item.update(status=status,provisional=True)
                     elif mode=='intraday':
                         item.update(status='盘中临时 · '+item['status'],provisional=True,volumeRatio=None)
                         item['confirmation']+='；盘中累计量不直接当作全天缩量'
@@ -529,16 +582,24 @@ def main():
                     item['evaluatedAt']=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
                     groups[kind].append(dict(code=code,name=universe[code],**item))
         print('K-line progress:',min(start+5,len(codes)),'/',len(codes),flush=True)
-    for values in groups.values(): values.sort(key=lambda r:(r['signalDate'],r['change']),reverse=True)
+    for kind in selected:
+        if kind == 'maPullback':
+            groups[kind].sort(key=lambda r:(-r['limitCount20'],-r['rewardRisk'],r['code']))
+        else:
+            groups[kind].sort(key=lambda r:(r['signalDate'],r['change']),reverse=True)
     if 'pullback' in selected: enforce_portfolio_cap(groups['pullback'])
     if codes and not verified: raise RuntimeError('No verified daily K-lines; retaining previous snapshot')
     for kind in ('pullback','second','triple'):
         groups.setdefault(kind,[])
         coverage.setdefault(kind,dict(total=0,returned=0,complete=False,conditions=[]))
     for kind in selected:
+        group_codes={code for code in codes if kind in membership[code]}
+        if kind == 'maPullback' and group_codes and not verified_codes & group_codes:
+            raise RuntimeError('No verified MA pullback daily K-lines; retaining previous snapshot')
         group_dates[kind]=session
         group_generated[kind]=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
-        group_stats[kind]=dict(verified=verified,universe=len(codes),failures=failures,mode=mode)
+        group_stats[kind]=dict(verified=len(verified_codes & group_codes),universe=len(group_codes),
+            failures=[item for item in failures if item['code'] in group_codes],mode=mode)
     if 'pullback' in selected: rule_versions['pullback']=PULLBACK_RULE_VERSION
     report=dict(version=1,asOf=session,generatedAt=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(),
         source='东方财富妙想 mx-xuangu宽筛 + 东方财富公开前复权行情API交叉复核',queries=queries,coverage=coverage,verified=verified,universe=len(codes),failures=failures,
@@ -549,5 +610,9 @@ def main():
     output.parent.mkdir(parents=True,exist_ok=True)
     output.write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
     print('Private report ready; verified:',verified,'unavailable:',len(failures))
+    if 'maPullback' in selected:
+        stats=group_stats['maPullback']
+        print(f"MA pullback snapshot: {session} ({mode}); matches={len(groups['maPullback'])}; "
+              f"verified={stats['verified']}/{stats['universe']}; complete={coverage['maPullback']['complete']}")
 
 if __name__=='__main__': main()

@@ -16,6 +16,29 @@ def history():
 
 
 class StrategyTests(unittest.TestCase):
+    def test_ma_pullback_requires_two_limits_and_two_to_one_at_current_price(self):
+        bars = history()[-20:]
+        for bar in bars[-5:-1]:
+            bar.update(close=11.5)
+        for bar in bars[-3:-1]:
+            bar.update(limit=1)
+        bars[-1].update(close=10.6)
+
+        item = evaluate(bars)['maPullback']
+        self.assertEqual(item['stopPrice'], 10.33)
+        self.assertEqual(item['firstTarget'], 11.32)
+        self.assertEqual(item['entryRange'], [10.34, 10.66])
+        self.assertEqual(item['limitCount20'], 2)
+        bars[-5]['close'] = 11.46
+        bars[-1]['close'] = 10.66
+        self.assertEqual(evaluate(bars)['maPullback']['rewardRisk'], 2)
+        for close in (10.30, 10.67, 11.5):
+            bars[-1]['close'] = close
+            self.assertNotIn('maPullback', evaluate(bars))
+        bars[-1]['close'] = 10.6
+        bars[-2]['limit'] = 0
+        self.assertNotIn('maPullback', evaluate(bars))
+
     def reclaim_history(self,count=2):
         bars=history()
         for i,b in enumerate(bars,1): b.update(close=8+i*.1,open=8+i*.1,high=8+i*.1+.2,low=8+i*.1-.1)
