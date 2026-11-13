@@ -362,8 +362,6 @@ def evaluate(bars):
             '回调观察 · 快照盈亏比达标',
             f"近20日{levels['limitCount20']}次涨停；低于最近涨停日收盘价 {event['close']:.2f}")
         found['maPullback'].update(levels, exit='触及MA20参考价止损；MA5参考价为初步止盈位。')
-    if len(bars) < 35:
-        return found
     reclaim=reclaim_match(bars)
     if reclaim:
         support=reclaim['trend']['current'][5]
@@ -386,7 +384,7 @@ def evaluate(bars):
             kCenters=[round(x,4) for x in reclaim['centers']],latestLimitDate=reclaim['latestLimit'],
             entryRange=[round(x,3) for x in zone],stopPrice=round(stop,3),firstTarget=round(target,3),
             rewardRisk=round(rr,2),recommendedPosition=0,action='观察')
-    if last.get('amount',0)<=1e8:
+    if len(bars)<35 or last.get('amount',0)<=1e8:
         return found
     # Historical official limit status is independent of price adjustment.
     limits = [b.get('limit') == 1 for b in bars]
@@ -437,14 +435,15 @@ def evaluate(bars):
     return found
 
 
-def tencent_daily(symbol, end, count, adjust=''):
+def tencent_daily(symbol, end, count, adjust='', *, full=False):
     url='https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?'+urllib.parse.urlencode(
         {'param':f'{symbol},day,,{end},{count},{adjust}'})
     payload=public_json(url)['data'][symbol]
-    return {row[0]:Decimal(row[2]) for row in payload.get('qfqday',payload.get('day',[])) if row[0]<=end}
+    return {row[0]:row if full else Decimal(row[2])
+        for row in payload.get('qfqday',payload.get('day',[])) if row[0]<=end}
 
 
-def public_ma_pullback(previous, mode):
+def public_ma_pullback(previous, mode, selected=('maPullback',)):
     """Publish a labeled partial snapshot from the available public limit-up pools."""
     today=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
     end=(today-dt.timedelta(days=1)).isoformat() if mode=='auction' else today.isoformat()
@@ -485,14 +484,16 @@ def public_ma_pullback(previous, mode):
         symbol=market+code
         try:
             raw=tencent_daily(symbol,session,25)
-            adjusted=tencent_daily(symbol,session,25,'qfq')
+            candles=tencent_daily(symbol,session,25,'qfq',full=True)
+            adjusted={day:Decimal(row[2]) for day,row in candles.items()}
             days=sorted(adjusted)[-21:]
             if len(days)<21 or days[-1]!=session or any(day not in raw for day in days):
                 raise ValueError('Missing daily history')
             limit=Decimal('1.30' if market=='bj' else '1.20' if code.startswith(('30','68'))
                 else '1.05' if 'ST' in name.upper() else '1.10')
             bars=[]
-            for prior,day in zip(days,days[1:]):
+            for index,day in enumerate(days):
+                prior=days[max(0,index-1)]
                 if raw[prior]<=0 or raw[day]<=0:
                     raise ValueError('Invalid close')
                 # Pool records confirm known dates. On older dates use raw tick prices
@@ -500,43 +501,62 @@ def public_ma_pullback(previous, mode):
                 stable=abs(adjusted[day]/raw[day]-adjusted[prior]/raw[prior])<Decimal('.0008')
                 cap=(raw[prior]*limit).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
                 pool_close=flags[code].get(day)
-                flag=int(pool_close==raw[day] or (stable and raw[day]==cap))
+                flag=int(index>0 and (pool_close==raw[day] or (stable and raw[day]==cap)))
                 price=float(adjusted[day])
-                bars.append(dict(date=day,close=price,limit=flag))
+                row=candles[day]
+                bars.append(dict(date=day,close=price,limit=flag,open=float(row[1]),high=float(row[3]),
+                    low=float(row[4]),volume=float(row[5]),change=float((raw[day]/raw[prior]-1)*100)))
+            items={}
+            # A historical candle at least 365 calendar days old establishes listing age.
+            if 'pullback' in selected and pullback_security_allowed(code,name):
+                reclaim=evaluate(bars).get('pullback')
+                age_limit=(dt.date.fromisoformat(session)-dt.timedelta(days=366)).isoformat()
+                if reclaim and tencent_daily(symbol,age_limit,1):
+                    reclaim.update(code=code,name=name,provisional=mode!='close',
+                        status='竞价观察 · 公开行情回退' if mode=='auction' else '公开行情回退 · 待承接')
+                    items['pullback']=reclaim
             plan=ma_pullback_plan(bars)
-            if not plan: return code,None,True
+            if not plan or 'maPullback' not in selected: return code,items,True
             event,levels=plan
-            return code,dict(code=code,name=name,signalDate=event['date'],close=bars[-1]['close'],
-                change=float((adjusted[session]/adjusted[days[-2]]-1)*100),status='公开行情回退 · 回调观察',
+            items['maPullback']=dict(code=code,name=name,signalDate=event['date'],close=bars[-1]['close'],
+                change=bars[-1]['change'],status='竞价观察 · 公开行情回退' if mode=='auction' else '公开行情回退 · 回调观察',
                 zone=levels['entryRange'],invalidation=levels['stopPrice'],provisional=mode!='close',
                 evidence=f"近20日核验{levels['limitCount20']}次涨停",
                 confirmation='公开数据覆盖有限，盘中承接待确认',
-                exit='MA20参考价止损，MA5参考价初步止盈',**levels),True
-        except (OSError, ValueError, ArithmeticError, KeyError, TypeError):
-            return code,None,False
+                exit='MA20参考价止损，MA5参考价初步止盈',**levels)
+            return code,items,True
+        except (OSError, ValueError, ArithmeticError, KeyError, TypeError, IndexError):
+            return code,{},False
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         checked=list(executor.map(verify,universe.items()))
     verified=sum(ok for _,_,ok in checked)
     if not verified:
         raise RuntimeError('No public daily histories verified')
-    matches=sorted((item for _,item,_ in checked if item),
-        key=lambda item:(-item['limitCount20'],-item['rewardRisk'],item['code']))
     failures=[dict(code=code,name=universe[code],reason='公开日K不可用') for code,_,ok in checked if not ok]
     stamp=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
-    if previous.get('groupAsOf',{}).get('maPullback','')>session:
-        raise RuntimeError('Public snapshot would replace a newer MA pullback snapshot')
     report=dict(previous)
     report.setdefault('failures',[])
-    report.setdefault('groups',{})['maPullback']=matches
-    report.setdefault('coverage',{})['maPullback']=dict(total=len(universe),returned=len(universe),complete=False,
-        conditions=[f'公开涨停池覆盖 {len(available)}/{len(dates)} 个交易日'])
-    report.setdefault('queries',{})['maPullback']='东方财富公开涨停池 + 腾讯不复权和前复权日K'
-    report.setdefault('groupAsOf',{})['maPullback']=session
-    report.setdefault('groupGeneratedAt',{})['maPullback']=stamp
-    report.setdefault('groupStats',{})['maPullback']=dict(verified=verified,universe=len(universe),failures=failures,
-        mode=mode,source=f'公开行情回退 · 东方财富涨停池 {len(available)}/{len(dates)} 日 · 腾讯日K')
-    print(f'Public MA pullback: {session} ({mode}); matches={len(matches)}; verified={verified}/{len(universe)}; pool days={len(available)}/{len(dates)}')
+    updated=False
+    for kind in selected:
+        if previous.get('groupAsOf',{}).get(kind,'')>session:
+            continue
+        matches=[items[kind] for _,items,_ in checked if kind in items]
+        matches.sort(key=lambda item:(-item['limitCount20'],-item.get('rewardRisk',0),item['code']))
+        report.setdefault('groups',{})[kind]=matches
+        report.setdefault('coverage',{})[kind]=dict(total=len(universe),returned=len(universe),complete=False,
+            conditions=[f'公开涨停池覆盖 {len(available)}/{len(dates)} 个交易日'])
+        report.setdefault('queries',{})[kind]='东方财富公开涨停池 + 腾讯不复权和前复权日K'
+        report.setdefault('groupAsOf',{})[kind]=session
+        report.setdefault('groupGeneratedAt',{})[kind]=stamp
+        report.setdefault('groupStats',{})[kind]=dict(verified=verified,universe=len(universe),failures=failures,
+            mode=mode,source=f'公开行情回退 · 东方财富涨停池 {len(available)}/{len(dates)} 日 · 腾讯日K')
+        if kind=='pullback':
+            report.setdefault('ruleVersions',{})[kind]=PULLBACK_RULE_VERSION
+        updated=True
+        print(f'Public {kind}: {session} ({mode}); matches={len(matches)}; verified={verified}/{len(universe)}; pool days={len(available)}/{len(dates)}')
+    if not updated:
+        raise RuntimeError('Public snapshot would replace a newer pullback snapshot')
     return report
 
 
@@ -550,6 +570,7 @@ def main():
     selection.add_argument('--pullback-only',action='store_true')
     selection.add_argument('--ma-pullback-only',action='store_true')
     selection.add_argument('--public-ma-pullback',action='store_true')
+    selection.add_argument('--public-pullback',choices=('pullback','maPullback','both'))
     parser.add_argument('--cutoff',help='Intraday cutoff in China time, for example 14:30')
     args=parser.parse_args()
     output=Path(args.output).resolve()
@@ -564,11 +585,13 @@ def main():
         prior_path=Path(args.previous).resolve()
         if ROOT in prior_path.parents: raise RuntimeError('Previous plaintext must remain outside repository')
         previous=json.loads(prior_path.read_text(encoding='utf-8'))
-    if args.public_ma_pullback:
+    if args.public_ma_pullback or args.public_pullback:
         if mode=='intraday':
             # Public daily candles cannot reconstruct an exact historical minute.
             mode='auction'
-        report=public_ma_pullback(previous,mode)
+        public_group=args.public_pullback or 'maPullback'
+        selected=('pullback','maPullback') if public_group=='both' else (public_group,)
+        report=public_ma_pullback(previous,mode,selected)
         output.parent.mkdir(parents=True,exist_ok=True)
         output.write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
         return
