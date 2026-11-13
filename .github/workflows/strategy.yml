@@ -41,12 +41,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Verify strategy rules and encryption
+      - name: Verify strategy rules
         run: |
           python scripts/test_strategy.py
-          node scripts/test_strategy_crypto.cjs
           node scripts/test_strategy_ranking.cjs
-      - name: Screen with Eastmoney MX and encrypt results
+      - name: Generate public strategy snapshot
         env:
           MX_APIKEY: ${{ secrets.MX_APIKEY }}
           STRATEGY_LOGIN_USERNAME: ${{ secrets.STRATEGY_LOGIN_USERNAME }}
@@ -63,7 +62,11 @@ jobs:
             '20 1 * * 1-5') mode=auction ;;
             '30 6 * * 1-5') mode=intraday; QUERY_CUTOFF=14:30 ;;
           esac
-          node scripts/encrypt_strategy.cjs --decrypt data/strategies.enc.json "$RUNNER_TEMP/previous-strategy.json"
+          if [ -f data/strategies.json ]; then
+            cp data/strategies.json "$RUNNER_TEMP/previous-strategy.json"
+          else
+            node scripts/encrypt_strategy.cjs --decrypt data/strategies.enc.json "$RUNNER_TEMP/previous-strategy.json"
+          fi
           options=()
           if [ "$PULLBACK_ONLY" = 'true' ]; then options+=(--pullback-only); fi
           if [ "$MA_PULLBACK_ONLY" = 'true' ]; then options+=(--ma-pullback-only); fi
@@ -78,16 +81,15 @@ jobs:
           fi
           rm "$RUNNER_TEMP/previous-strategy.json"
           if [ -f "$RUNNER_TEMP/private-strategy.json" ]; then
-            node scripts/encrypt_strategy.cjs "$RUNNER_TEMP/private-strategy.json" data/strategies.enc.json
-            rm "$RUNNER_TEMP/private-strategy.json"
+            mv "$RUNNER_TEMP/private-strategy.json" data/strategies.json
           fi
-      - name: Publish encrypted snapshot only
+      - name: Publish strategy snapshot
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/strategies.enc.json
+          git add data/strategies.json
           if ! git diff --cached --quiet; then
-            git commit -m 'data: update encrypted private strategy snapshot'
+            git commit -m 'data: update public strategy snapshot'
             git pull --rebase origin main
             git push origin main
           fi

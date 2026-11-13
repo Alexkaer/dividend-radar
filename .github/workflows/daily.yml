@@ -90,7 +90,7 @@ jobs:
           cp index.html style.css app.js share.js live-data.js market.html market.css market.js hardware.html hardware.css hardware.js hardware-metrics.js visitor-count.js dialog-dismiss.js _site/
           cp strategy.html strategy.css strategy.js strategy-ranking.js _site/
           cp data/stocks.json data/market.json data/hardware.json data/hardware-universe.json _site/data/
-          cp data/strategies.enc.json _site/data/
+          if [ -f data/strategies.json ]; then cp data/strategies.json _site/data/; fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

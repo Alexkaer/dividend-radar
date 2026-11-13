@@ -1,13 +1,12 @@
 (() => {
   'use strict';
-  let report=null, credentials=null, kind='pullback', epoch=0, quotes={}, quoteBusy=false, quoteEpoch=0, quoteFetchedAt=null, snapshotFingerprint=null, snapshotBusy=false;
+  let report=null, kind='pullback', epoch=0, quotes={}, quoteBusy=false, quoteEpoch=0, quoteFetchedAt=null, snapshotFingerprint=null, snapshotBusy=false;
   const $=id=>document.getElementById(id);
   const names={pullback:'涨停回调低吸',maPullback:'涨停回调 · MA20止损',second:'二板后回调',triple:'修正版三倍量'};
   const pullbackVersion='2026-11-10-mainboard-reclaim-v4';
   let legacyPullback=false;
   const groupDate=k=>report.groupAsOf?.[k]||(k==='maPullback'?null:report.asOf);
   const rules={pullback:'近20个交易日至少2次真实涨停；仅沪深主板非ST，上市超过365天。回调收盘守住MA20，近3根K线重心连续上移，MA10>MA20且两线向上；回调过程曾破MA5，之后重新站回，当前MA5乖离0%至5%。不要求反包，不再以当日涨幅超过5%为排除条件。工作日09:20竞价观察、14:30盘中确认。',maPullback:'近20个交易日至少2次涨停，现价低于最近一次涨停日收盘价且高于MA20。MA20为止损位，MA5为初步止盈位，两者以策略快照为准。盈亏比至少2:1；按涨停次数降序，同次数按快照盈亏比降序。',second:'近30日真实连续≥2板，断板后3–10日、量不高于断板量的一半，守住启动低点并回踩MA10。一字板或3板以上降级。14:45仍需VWAP与承接确认。',triple:'近5日同一根日K量≥前日3倍、收阳涨幅>3%、收在振幅上半区。信号日只观察；左侧看底部区间，右侧看后续阳线实体收盘突破信号K最高点。不设均线多头硬门槛。'};
-  const decode=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
   const when=t=>new Date(t*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
   function renderTop(){
     const dates=Object.fromEntries(Object.keys(report.groups).map(k=>[k,groupDate(k)]));
@@ -55,41 +54,13 @@
       $('quoteStatus').textContent=`行情来源：东方财富公开行情 · 有效 ${valid.length}/${codes.length} · 获取于 ${new Date(quoteFetchedAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})}`+(times.length?' · 源时间 '+when(Math.min(...times))+' 至 '+when(Math.max(...times)):' · 暂无可确认的今日行情')+(failed?` · ${failed}只请求失败`:'')+'。休市时显示最新收盘行情；日线池不因行情刷新扩充。';
     }finally{if(current===epoch&&request===quoteEpoch){quoteBusy=false;$('refreshQuotes').disabled=false;}}
   }
-  async function savedSession(operation, material){
-    const database=await new Promise((resolve,reject)=>{
-      const request=indexedDB.open('dividend-strategy-session',1);
-      request.onupgradeneeded=()=>request.result.createObjectStore('session');
-      request.onsuccess=()=>resolve(request.result);
-      request.onerror=()=>reject(request.error);
-    });
-    try {
-      return await new Promise((resolve,reject)=>{
-        const transaction=database.transaction('session',operation==='get'?'readonly':'readwrite');
-        const store=transaction.objectStore('session');
-        const request=operation==='get'?store.get('key'):
-          operation==='save'?store.put(material,'key'):store.delete('key');
-        transaction.oncomplete=()=>resolve(request.result);
-        transaction.onabort=()=>reject(transaction.error);
-      });
-    } finally {
-      database.close();
-    }
-  }
-  async function load(material, requestEpoch, onlyIfChanged=false) {
-    const url=new URL('data/strategies.enc.json',location.href);url.searchParams.set('_',String(Date.now()));
-    const response=await fetch(url,{cache:'no-store',credentials:'omit'});
-    if(!response.ok) throw new Error('snapshot');
-    const envelope=await response.json();
-    if(envelope.version!==1 || envelope.kdf!=='PBKDF2-SHA256' || envelope.iterations!==600000) throw new Error('format');
-    const fingerprint=envelope.iv+':'+envelope.ciphertext.length;
-    if(onlyIfChanged&&fingerprint===snapshotFingerprint)return null;
-    const salt=decode(envelope.salt);
-    const bits=await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations:envelope.iterations},material,256);
-    const key=await crypto.subtle.importKey('raw',bits,'AES-GCM',false,['decrypt']);
-    const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:decode(envelope.iv),additionalData:new TextEncoder().encode('dividend-strategy-v1'),tagLength:128},key,decode(envelope.ciphertext));
-    const value=JSON.parse(new TextDecoder().decode(plain));
-    if(requestEpoch!==epoch)return false;
-    credentials=material;
+  async function load(requestEpoch, onlyIfChanged=false){
+    const response=await fetch(new URL('data/strategies.json',location.href),{cache:'no-store',credentials:'omit'});
+    if(!response.ok)throw Error('snapshot');
+    const value=await response.json();
+    if(value.version!==1||!value.groups||!value.generatedAt)throw Error('format');
+    const fingerprint=value.generatedAt;
+    if(requestEpoch!==epoch||(onlyIfChanged&&fingerprint===snapshotFingerprint))return false;
     report=value;
     snapshotFingerprint=fingerprint;
     legacyPullback=report.ruleVersions?.pullback!==pullbackVersion;
@@ -125,10 +96,10 @@
     if(failures)paragraph($('method'),'本策略未复核标的：'+(stats?.failures||report.failures).map(x=>x.code+' '+x.name).join('、'));
   }
   async function autoReloadSnapshot(){
-    if(snapshotBusy||!report||!credentials||document.visibilityState!=='visible')return;
+    if(snapshotBusy||!report||document.visibilityState!=='visible')return;
     const current=epoch;snapshotBusy=true;
     try{
-      if(await load(credentials,current,true)){
+      if(await load(current,true)){
         quoteEpoch++;quoteBusy=false;quotes={};quoteFetchedAt=null;render();
         $('refreshStatus').textContent='后台策略快照已自动更新：'+new Date().toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
         refreshQuotes();
@@ -136,71 +107,23 @@
     }catch{if(current===epoch)$('refreshStatus').textContent='自动检查暂时失败，保留当前有效结果。';}
     finally{snapshotBusy=false;}
   }
-  function lock(){$('loginButton').disabled=false;epoch++;quoteEpoch++;report=null;credentials=null;quotes={};quoteBusy=false;quoteFetchedAt=null;snapshotFingerprint=null;snapshotBusy=false;$('refreshQuotes').disabled=false;$('workspace').hidden=true;$('loginPanel').hidden=false;$('logout').hidden=true;$('rows').replaceChildren();$('method').replaceChildren();$('topPicks').replaceChildren();for(const id of ['asOf','generated','verified','coverageAlert','refreshStatus','quoteStatus','topCount'])$(id).textContent='';$('password').value='';$('loginStatus').textContent='已退出，策略内容已清除。';}
-  function showWorkspace(){
-    render();
-    $('loginPanel').hidden=true;
-    $('workspace').hidden=false;
-    $('logout').hidden=false;
-    $('loginStatus').textContent='';
-    refreshQuotes();
-  }
-  const sessionChannel=typeof BroadcastChannel==='function'?new BroadcastChannel('dividend-strategy-session'):null;
-  sessionChannel?.addEventListener('message',e=>{if(e.data==='logout')lock();});
-  $('loginForm').addEventListener('submit',async e=>{
-    e.preventDefault();
-    const current=++epoch, user=$('username').value, pass=$('password').value;
-    $('password').value='';
-    $('loginButton').disabled=true;
-    $('loginStatus').textContent='正在安全解锁…';
+  async function openWorkspace(){
     try {
-      const material=await crypto.subtle.importKey('raw',new TextEncoder().encode(user+'\0'+pass),'PBKDF2',false,['deriveBits']);
-      if(await load(material,current)){
-        try { await savedSession('save',material); }
-        catch { if(current===epoch)$('refreshStatus').textContent='浏览器限制了保存登录状态，本次访问已解锁。'; }
-        if(current===epoch)showWorkspace();
+      if(await load(epoch)){
+        render();
+        $('workspace').hidden=false;
+        $('snapshotStatus').hidden=true;
+        refreshQuotes();
       }
-    } catch(error) {
-      if(current===epoch)$('loginStatus').textContent=error.name==='OperationError'?'账号或密码不正确。':'无法读取策略快照，请稍后重试。';
-    } finally {
-      if(current===epoch)$('loginButton').disabled=false;
-    }
-  });
-  $('logout').addEventListener('click',async()=>{
-    lock();
-    const current=epoch;
-    $('loginButton').disabled=true;
-    try {
-      await savedSession('delete');
-      sessionChannel?.postMessage('logout');
     } catch {
-      if(current===epoch)$('loginStatus').textContent='已锁定此页面，浏览器未能清除保存的登录状态。';
-    } finally {
-      if(current===epoch)$('loginButton').disabled=false;
-    }
-  });
-  async function restoreSession(){
-    const current=epoch;
-    $('loginButton').disabled=true;
-    try {
-      const material=await savedSession('get');
-      if(current===epoch&&material&&await load(material,current))showWorkspace();
-    } catch(error) {
-      if(current===epoch&&error.name==='OperationError'){
-        $('loginStatus').textContent='已保存的登录已失效，请重新登录。';
-      } else if(current===epoch&&error.name!=='SecurityError'){
-        $('loginStatus').textContent='暂时无法恢复登录，可刷新页面重试。';
-      }
-    } finally {
-      if(current===epoch)$('loginButton').disabled=false;
+      $('snapshotStatus').textContent='策略快照暂不可用，稍后会自动重试。';
     }
   }
-  $('reload').addEventListener('click',async()=>{const current=epoch;$('reload').disabled=true;$('refreshStatus').textContent='正在获取最新后台快照…';try{if(await load(credentials,current)){quoteEpoch++;quoteBusy=false;quotes={};quoteFetchedAt=null;render();$('refreshStatus').textContent='已读取最新可用快照；涨停回调09:20、14:30更新。';refreshQuotes();}}catch{if(current===epoch)$('refreshStatus').textContent='更新失败，保留原日期和当前结果。';}finally{$('reload').disabled=false;}});
+  $('reload').addEventListener('click',async()=>{const current=epoch;$('reload').disabled=true;$('refreshStatus').textContent='正在获取最新后台快照…';try{if(await load(current)){quoteEpoch++;quoteBusy=false;quotes={};quoteFetchedAt=null;render();$('refreshStatus').textContent='已读取最新可用快照；涨停回调09:20、14:30更新。';refreshQuotes();}}catch{if(current===epoch)$('refreshStatus').textContent='更新失败，保留原日期和当前结果。';}finally{$('reload').disabled=false;}});
   $('refreshQuotes').addEventListener('click',refreshQuotes);
   document.querySelectorAll('[data-kind]').forEach(b=>b.addEventListener('click',()=>{kind=b.dataset.kind;render();}));
   document.querySelector('.strategy-tabs').addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight'].includes(e.key))return;e.preventDefault();const buttons=[...document.querySelectorAll('[data-kind]')];const index=buttons.findIndex(b=>b.dataset.kind===kind);buttons[(index+(e.key==='ArrowRight'?1:buttons.length-1))%buttons.length].click();buttons.find(b=>b.dataset.kind===kind).focus();});
-  setInterval(autoReloadSnapshot,60000);
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')autoReloadSnapshot();});
-  window.addEventListener('pageshow',e=>{if(e.persisted){lock();restoreSession();}});
-  restoreSession();
+  setInterval(()=>report?autoReloadSnapshot():openWorkspace(),60000);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&report)autoReloadSnapshot();});
+  openWorkspace();
 })();
