@@ -68,7 +68,12 @@ jobs:
           if [ "$PULLBACK_ONLY" = 'true' ]; then options+=(--pullback-only); fi
           if [ "$MA_PULLBACK_ONLY" = 'true' ]; then options+=(--ma-pullback-only); fi
           if [ -n "$QUERY_CUTOFF" ]; then options+=(--cutoff "$QUERY_CUTOFF"); fi
-          python scripts/strategy_screen.py --mode "$mode" --previous "$RUNNER_TEMP/previous-strategy.json" "${options[@]}" --output "$RUNNER_TEMP/private-strategy.json"
+          if ! python scripts/strategy_screen.py --mode "$mode" --previous "$RUNNER_TEMP/previous-strategy.json" "${options[@]}" --output "$RUNNER_TEMP/private-strategy.json" ||
+             [ ! -f "$RUNNER_TEMP/private-strategy.json" ]; then
+            if [ "$PULLBACK_ONLY" = 'true' ]; then exit 1; fi
+            echo "MX did not produce a snapshot. Retrying MA pullback with public market data."
+            python scripts/strategy_screen.py --mode "$mode" --public-ma-pullback --previous "$RUNNER_TEMP/previous-strategy.json" --output "$RUNNER_TEMP/private-strategy.json"
+          fi
           rm "$RUNNER_TEMP/previous-strategy.json"
           if [ -f "$RUNNER_TEMP/private-strategy.json" ]; then
             node scripts/encrypt_strategy.cjs "$RUNNER_TEMP/private-strategy.json" data/strategies.enc.json

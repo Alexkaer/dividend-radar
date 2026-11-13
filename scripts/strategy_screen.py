@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 _SECTOR_CHANGES = None
@@ -436,6 +437,109 @@ def evaluate(bars):
     return found
 
 
+def tencent_daily(symbol, end, count, adjust=''):
+    url='https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?'+urllib.parse.urlencode(
+        {'param':f'{symbol},day,,{end},{count},{adjust}'})
+    payload=public_json(url)['data'][symbol]
+    return {row[0]:Decimal(row[2]) for row in payload.get('qfqday',payload.get('day',[])) if row[0]<=end}
+
+
+def public_ma_pullback(previous, mode):
+    """Publish a labeled partial snapshot from the available public limit-up pools."""
+    today=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
+    end=(today-dt.timedelta(days=1)).isoformat() if mode=='auction' else today.isoformat()
+    dates=sorted(tencent_daily('sh000001',end,20))[-20:]
+    if len(dates)!=20:
+        raise RuntimeError('Public trading calendar incomplete')
+    session=dates[-1]
+    if mode!='auction' and session!=today.isoformat():
+        raise RuntimeError('Public data has no current trading session')
+    def pool(day):
+        url='https://push2ex.eastmoney.com/getTopicZTPool?'+urllib.parse.urlencode(dict(
+            ut='7eea3edcaed734bea9cbfc24409ed989',dpt='wz.ztzt',Pageindex=0,pagesize=500,sort='fbt:asc',
+            date=day.replace('-','')))
+        data=public_json(url).get('data') or {}
+        rows=data.get('pool') or []
+        return (day,rows) if rows and data.get('tc')==len(rows) else (day,[])
+
+    def safe_pool(day):
+        try: return pool(day)
+        except (OSError, ValueError, KeyError): return day,[]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+        pools=dict(executor.map(safe_pool,dates))
+    available={day for day,rows in pools.items() if rows}
+    if len(available)<2:
+        raise RuntimeError('Public limit-up pools unavailable')
+    universe={}
+    flags={}
+    for day,rows in pools.items():
+        for row in rows:
+            code=str(row['c'])
+            universe[code]=row['n']
+            flags.setdefault(code,{})[day]=Decimal(str(row['p']))/1000
+
+    def verify(pair):
+        code,name=pair
+        market='sh' if code.startswith('6') else 'bj' if code.startswith(('4','8','92')) else 'sz'
+        symbol=market+code
+        try:
+            raw=tencent_daily(symbol,session,25)
+            adjusted=tencent_daily(symbol,session,25,'qfq')
+            days=sorted(adjusted)[-21:]
+            if len(days)<21 or days[-1]!=session or any(day not in raw for day in days):
+                raise ValueError('Missing daily history')
+            limit=Decimal('1.30' if market=='bj' else '1.20' if code.startswith(('30','68'))
+                else '1.05' if 'ST' in name.upper() else '1.10')
+            bars=[]
+            for prior,day in zip(days,days[1:]):
+                if raw[prior]<=0 or raw[day]<=0:
+                    raise ValueError('Invalid close')
+                # Pool records confirm known dates. On older dates use raw tick prices
+                # only when the adjustment factor has not materially changed.
+                stable=abs(adjusted[day]/raw[day]-adjusted[prior]/raw[prior])<Decimal('.0008')
+                cap=(raw[prior]*limit).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
+                pool_close=flags[code].get(day)
+                flag=int(pool_close==raw[day] or (stable and raw[day]==cap))
+                price=float(adjusted[day])
+                bars.append(dict(date=day,close=price,limit=flag))
+            plan=ma_pullback_plan(bars)
+            if not plan: return code,None,True
+            event,levels=plan
+            return code,dict(code=code,name=name,signalDate=event['date'],close=bars[-1]['close'],
+                change=float((adjusted[session]/adjusted[days[-2]]-1)*100),status='公开行情回退 · 回调观察',
+                zone=levels['entryRange'],invalidation=levels['stopPrice'],provisional=mode!='close',
+                evidence=f"近20日核验{levels['limitCount20']}次涨停",
+                confirmation='公开数据覆盖有限，盘中承接待确认',
+                exit='MA20参考价止损，MA5参考价初步止盈',**levels),True
+        except (OSError, ValueError, ArithmeticError, KeyError, TypeError):
+            return code,None,False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        checked=list(executor.map(verify,universe.items()))
+    verified=sum(ok for _,_,ok in checked)
+    if not verified:
+        raise RuntimeError('No public daily histories verified')
+    matches=sorted((item for _,item,_ in checked if item),
+        key=lambda item:(-item['limitCount20'],-item['rewardRisk'],item['code']))
+    failures=[dict(code=code,name=universe[code],reason='公开日K不可用') for code,_,ok in checked if not ok]
+    stamp=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
+    if previous.get('groupAsOf',{}).get('maPullback','')>session:
+        raise RuntimeError('Public snapshot would replace a newer MA pullback snapshot')
+    report=dict(previous)
+    report.setdefault('failures',[])
+    report.setdefault('groups',{})['maPullback']=matches
+    report.setdefault('coverage',{})['maPullback']=dict(total=len(universe),returned=len(universe),complete=False,
+        conditions=[f'公开涨停池覆盖 {len(available)}/{len(dates)} 个交易日'])
+    report.setdefault('queries',{})['maPullback']='东方财富公开涨停池 + 腾讯不复权和前复权日K'
+    report.setdefault('groupAsOf',{})['maPullback']=session
+    report.setdefault('groupGeneratedAt',{})['maPullback']=stamp
+    report.setdefault('groupStats',{})['maPullback']=dict(verified=verified,universe=len(universe),failures=failures,
+        mode=mode,source=f'公开行情回退 · 东方财富涨停池 {len(available)}/{len(dates)} 日 · 腾讯日K')
+    print(f'Public MA pullback: {session} ({mode}); matches={len(matches)}; verified={verified}/{len(universe)}; pool days={len(available)}/{len(dates)}')
+    return report
+
+
 def main():
     import argparse
     parser=argparse.ArgumentParser()
@@ -445,6 +549,7 @@ def main():
     selection=parser.add_mutually_exclusive_group()
     selection.add_argument('--pullback-only',action='store_true')
     selection.add_argument('--ma-pullback-only',action='store_true')
+    selection.add_argument('--public-ma-pullback',action='store_true')
     parser.add_argument('--cutoff',help='Intraday cutoff in China time, for example 14:30')
     args=parser.parse_args()
     output=Path(args.output).resolve()
@@ -459,6 +564,14 @@ def main():
         prior_path=Path(args.previous).resolve()
         if ROOT in prior_path.parents: raise RuntimeError('Previous plaintext must remain outside repository')
         previous=json.loads(prior_path.read_text(encoding='utf-8'))
+    if args.public_ma_pullback:
+        if mode=='intraday':
+            # Public daily candles cannot reconstruct an exact historical minute.
+            mode='auction'
+        report=public_ma_pullback(previous,mode)
+        output.parent.mkdir(parents=True,exist_ok=True)
+        output.write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
+        return
     dates=[]
     for date_query in ('上证指数最近5个交易日每日收盘价，返回交易日期',
                        '上证指数000001.SH最近10个交易日每日收盘价和成交额，返回每个交易日期',

@@ -95,6 +95,7 @@
     const incomplete=report.coverage[kind]?.complete!==true, failures=(stats?.failures||report.failures).length;
     $('coverageAlert').textContent=(incomplete?'宽筛返回不完整，仅展示实际返回并复核的范围。':'已完成本次宽筛候选覆盖。')+(failures?` ${failures}只历史数据不完整，未计入通过名单。`:'')+' 所有结果为日线观察候选；竞价、分时和板块强度待确认。';
     if(!groupDate(kind))$('coverageAlert').textContent='新策略等待首次筛选快照。';
+    if(stats?.source)$('coverageAlert').textContent=stats.source+'。'+$('coverageAlert').textContent;
     if(legacyPullback&&kind==='pullback')$('coverageAlert').textContent='涨停回调策略已切换沪深主板、多头均线新版：旧版名单已停用，等待妙想按新规则完成筛选。其他策略保留各自原日期。'+$('coverageAlert').textContent;
     if(stats?.mode==='auction')$('coverageAlert').textContent+=' 当前为09:20竞价观察：使用上一完整交易日形态，不代表当日已重新站回均线。';
     if(stats?.mode==='intraday')$('coverageAlert').textContent+=' 当前为盘中临时信号，仍需收盘复核。';
