@@ -3,6 +3,7 @@ on:
   schedule:
     - cron: '20 1 * * 1-5'
     - cron: '30 6 * * 1-5'
+    - cron: '30 7 * * 1-5'
   workflow_dispatch:
     inputs:
       mode:
@@ -61,6 +62,7 @@ jobs:
           case "$QUERY_SCHEDULE" in
             '20 1 * * 1-5') mode=auction ;;
             '30 6 * * 1-5') mode=intraday; QUERY_CUTOFF=14:30 ;;
+            '30 7 * * 1-5') mode=close ;;
           esac
           if [ -f data/strategies.json ]; then
             cp data/strategies.json "$RUNNER_TEMP/previous-strategy.json"
@@ -73,7 +75,7 @@ jobs:
           if [ -n "$QUERY_CUTOFF" ]; then options+=(--cutoff "$QUERY_CUTOFF"); fi
           if ! python scripts/strategy_screen.py --mode "$mode" --previous "$RUNNER_TEMP/previous-strategy.json" "${options[@]}" --output "$RUNNER_TEMP/private-strategy.json" ||
              [ ! -f "$RUNNER_TEMP/private-strategy.json" ]; then
-            public_group=both
+            public_group=all
             if [ "$PULLBACK_ONLY" = 'true' ]; then public_group=pullback; fi
             if [ "$MA_PULLBACK_ONLY" = 'true' ]; then public_group=maPullback; fi
             echo "MX did not produce a snapshot. Retrying $public_group with public market data."

@@ -36,6 +36,51 @@
     const first=await get(1),rest=await pool(Array.from({length:first.pages-1},(_,i)=>i+2),get);
     const rows=[...first.data,...rest.flatMap(r=>r.data)];if(rows.length!==first.count)throw Error('财报分页不完整');return rows;
   }
+  async function tencentQuotes(codes){
+    const symbols=codes.map(code=>(code.startsWith('6')?'sh':/^[489]/.test(code)?'bj':'sz')+code);
+    const response=await fetch('https://qt.gtimg.cn/q='+symbols.join(','),{signal:AbortSignal.timeout(10000)});
+    if(!response.ok)throw Error('腾讯行情暂不可用');
+    const body=new TextDecoder('gbk').decode(await response.arrayBuffer());
+    const rows=[];
+    for(const match of body.matchAll(/v_(?:sh|sz|bj)\d{6}="([^"]*)"/g)){
+      const fields=match[1].split('~'),code=fields[2],stamp=fields[30];
+      if(!codes.includes(code)||!(n(fields[3])>0)||!/^\d{14}$/.test(stamp))continue;
+      const time=Date.parse(stamp.replace(/^(....)(..)(..)(..)(..)(..)$/,'$1-$2-$3T$4:$5:$6+08:00'))/1000;
+      rows.push({f12:code,f13:code.startsWith('6')?1:0,f14:fields[1],f2:n(fields[3]),f3:n(fields[32]),
+        f6:n(fields[37])==null?null:n(fields[37])*10000,f8:n(fields[38]),f20:n(fields[45])==null?null:n(fields[45])*1e8,
+        f23:n(fields[47]),f115:n(fields[39]),f124:time});
+    }
+    if(!rows.length)throw Error('腾讯行情为空');
+    return rows;
+  }
+  async function sinaQuotes(){
+    const base='https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/';
+    const get=async path=>{
+      const response=await fetch(base+path,{signal:AbortSignal.timeout(10000)});
+      if(!response.ok)throw Error('新浪行情暂不可用');
+      return response.json();
+    };
+    const [total,benchmark]=await Promise.all([get('Market_Center.getHQNodeStockCount?node=hs_a'),tencentKline('1.000001',3,0)]);
+    const date=benchmark.at(-1).date;
+    const pages=await pool(Array.from({length:Math.ceil(Number(total)/100)},(_,i)=>i+1),
+      page=>get('Market_Center.getHQNodeData?node=hs_a&num=100&sort=symbol&asc=1&page='+page),6);
+    const rows=pages.flat();
+    if(!rows.length||new Set(rows.map(r=>r.code)).size!==Number(total))throw Error('新浪行情分页不完整');
+    return rows.map(r=>({f12:r.code,f13:r.symbol.startsWith('sh')?1:0,f14:r.name,f2:n(r.trade),f3:n(r.changepercent),
+      f20:n(r.mktcap)==null?null:n(r.mktcap)*10000,f23:n(r.pb),f115:n(r.per),
+      f124:Date.parse(date+'T'+r.ticktime+'+08:00')/1000,provider:'新浪'}));
+  }
+  async function tencentKline(secid,count,adjust){
+    const [market,code]=secid.split('.'),symbol=(market==='1'?'sh':/^[489]/.test(code)&&code!=='899050'?'bj':'sz')+code;
+    const url=new URL('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get');
+    url.searchParams.set('param',[symbol,'day','','',count,adjust?'qfq':''].join(','));
+    const response=await fetch(url,{signal:AbortSignal.timeout(10000)});
+    if(!response.ok)throw Error('腾讯日K暂不可用');
+    const data=(await response.json()).data?.[symbol],rows=data?.qfqday||data?.day;
+    if(!rows?.length)throw Error('腾讯日K为空');
+    return rows.map((r,i)=>({date:r[0],close:n(r[2]),amount:null,change:i?(Number(r[2])/Number(rows[i-1][2])-1)*100:null}));
+  }
+  window.RadarTencentQuotes=tencentQuotes;
   let quotePromise=null;
   function quotes(progress){
     if(quotePromise)return quotePromise;
@@ -44,13 +89,15 @@
       const first=await get(1);let done=1;const pages=Math.ceil(first.total/100);progress?.('获取全市场行情 1/'+pages);
       const rest=await pool(Array.from({length:pages-1},(_,i)=>i+2),async page=>{const r=await get(page);progress?.('获取全市场行情 '+(++done)+'/'+pages);return r});
       const rows=[...first.diff,...rest.flatMap(r=>r.diff)];if(new Set(rows.map(r=>r.f12)).size!==first.total)throw Error('全市场行情分页不完整');return rows;
-    })();
+    })().catch(sinaQuotes);
     return quotePromise.finally(()=>{quotePromise=null});
   }
-  async function kline(secid,count=320,adjust=0){
+  async function kline(secid,count=320,adjust=0,requireAmount=false){
+    try{
     const d=(await request('https://push2his.eastmoney.com/api/qt/stock/kline/get',{secid,klt:101,fqt:adjust,lmt:count,end:20500101,fields1:'f1,f2,f3,f4,f5,f6',fields2:'f51,f52,f53,f54,f55,f56,f57,f58,f59'})).data;
     if(!d?.klines?.length)throw Error('历史行情暂不可用');
     return d.klines.map(row=>{const r=row.split(',');return {date:r[0],close:Number(r[2]),amount:Number(r[6]),change:n(r[8])}});
+    }catch(error){if(requireAmount)throw error;return tencentKline(secid,count,adjust);}
   }
   function boll(bars,prefix){
     if(bars.length<21)return null;
@@ -114,7 +161,7 @@
       pool(stocks,async s=>{try{s.technical=technical(await kline((s.market==='沪市'?'1.':s.market==='北交所'?'0.':'0.')+s.code,320,1),asOf)}catch{s.technical={status:'unavailable',asOf:null,daily:null,weekly:null};warnings.push(s.name+' BOLL暂不可用')}progress?.('历史指标 '+(++done)+'/'+stocks.length);})
     ]);
     const prior=new Map((seed?.stocks||[]).map(s=>[s.code,s]));for(const s of stocks){if(!s.fundamentals){s.fundamentals=prior.get(s.code)?.fundamentals||{status:'unavailable',label:'待更新',industry:'待更新'};s.fundamentals={...s.fundamentals,cached:true}}if(!s.ownership){s.ownership=prior.get(s.code)?.ownership||{category:'待核实'};s.ownership={...s.ownership,cached:true}}}
-    return {updatedAt:new Date().toISOString(),windowStart:start,windowEnd:asOf,quoteAt:stamp,universe:all.length,dividendRecords:dividends.length,source:'东方财富浏览器直连行情、历史K线及财报',method:seed?.method||'近365天已除息税前每股派息之和÷最新价；未对期间股本变动调整，特殊公司须复核。',stocks,warnings:[...new Set(warnings)],live:true};
+    return {updatedAt:new Date().toISOString(),windowStart:start,windowEnd:asOf,quoteAt:stamp,universe:all.length,dividendRecords:dividends.length,source:all.some(q=>q.provider==='新浪')?'新浪行情 · 东方财富分红及财报':'东方财富浏览器直连行情、历史K线及财报',method:seed?.method||'近365天已除息税前每股派息之和÷最新价；未对期间股本变动调整，特殊公司须复核。',stocks,warnings:[...new Set(warnings)],live:true};
   }
   const INDEX=[['1.000001','上证指数'],['0.399001','深证成指'],['0.399006','创业板指'],['1.000688','科创50'],['1.000300','沪深300'],['0.899050','北证50'],['1.000016','上证50'],['1.000905','中证500']];
   async function limits(asOf){const result={};for(const [key,endpoint] of [['up','getTopicZTPool'],['down','getTopicDTPool']]){const d=(await request('https://push2ex.eastmoney.com/'+endpoint,{ut:'7eea3edcaed734bea9cbfc24409ed989',dpt:'wz.ztzt',Pageindex:0,pagesize:1000,sort:key==='up'?'fbt:asc':'fund:asc',date:asOf.replaceAll('-','')})).data;if(!d||String(d.qdate)!==asOf.replaceAll('-',''))throw Error('涨跌停股池日期不匹配');result[key]=d.tc}return {...result,scope:'东方财富涨跌停股池收录数，并非全A股统一口径，ST、北交所等范围可能与软件不同。'}}
@@ -130,7 +177,7 @@
 
   async function refreshMarket(seed,progress){
     progress?.('正在获取指数和市场广度…');
-    const [all,histories,sh,sz]=await Promise.all([quotes(progress),pool(INDEX,async item=>({item,bars:await kline(item[0],3)})),kline('1.000001',20),kline('0.399001',20)]);
+    const [all,histories,sh,sz]=await Promise.all([quotes(progress),pool(INDEX,async item=>({item,bars:await kline(item[0],3)})),kline('1.000001',20,0,true),kline('0.399001',20,0,true)]);
     const asOf=sh.at(-1).date;if(sz.at(-1).date!==asOf)throw Error('沪深量能日期不匹配');
     const indices=histories.map(({item,bars})=>{const r=bars.filter(b=>b.date<=asOf).at(-1);if(r?.date!==asOf)throw Error('指数日期不匹配');return {code:item[0].split('.')[1],name:item[1],...r}});
     const changes=all.filter(q=>n(q.f2)>0&&n(q.f3)!=null&&day((n(q.f124)||0)*1000)===asOf).map(q=>q.f3);if(changes.length<4500)throw Error('同日广度行情覆盖不足');const up=changes.filter(v=>v>0).length,down=changes.filter(v=>v<0).length,breadth={up,down,flat:changes.length-up-down,total:changes.length,universe:all.length,advanceShare:up+down?up/(up+down):null};
@@ -138,20 +185,21 @@
     const recent=sum(days.slice(-5).map(r=>r.amount)),previous=sum(days.slice(0,5).map(r=>r.amount)),turnover={days,today:days.at(-1).amount,dayChangePct:(days.at(-1).amount/days.at(-2).amount-1)*100,fiveDayChangePct:(recent/previous-1)*100,recentFiveDayAverage:recent/5,previousFiveDayAverage:previous/5,scope:'沪深主指数成交额合计，不含北交所；盘中为截至抓取时的累计成交额，不能与完整交易日直接比较。'};
     const main=indices.filter(r=>['000001','399001'].includes(r.code)),score=breadth.advanceShare==null||!l.up&&!l.down?null:Math.round(100*(.6*breadth.advanceShare+.25*l.up/(l.up+l.down)+.15*Math.max(0,Math.min(1,.5+avg(main.map(r=>r.change))/6))));
     const label=score==null?'待判断':score>=75?'活跃':score>=55?'偏强':score>=45?'分歧':score>=25?'偏弱':'低迷',hour=Number(new Date().toLocaleTimeString('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',hour12:false}));
-    return {updatedAt:new Date().toISOString(),asOf,session:asOf===day(Date.now())&&hour<15?'盘中快照':'收盘快照',indices,breadth,limits:l,sentiment:{label,score,method:seed?.sentiment?.method||'60%上涨占比+25%涨停池占比+15%指数强弱分；规则描述，不预测未来。'},turnover,sectors:s,source:'东方财富浏览器直连行情与历史K线',live:true};
+    return {updatedAt:new Date().toISOString(),asOf,session:asOf===day(Date.now())&&hour<15?'盘中快照':'收盘快照',indices,breadth,limits:l,sentiment:{label,score,method:seed?.sentiment?.method||'60%上涨占比+25%涨停池占比+15%指数强弱分；规则描述，不预测未来。'},turnover,sectors:s,source:all.some(q=>q.provider==='新浪')?'新浪市场广度 · 东方财富市场统计':'东方财富浏览器直连行情与历史K线',live:true};
   }
   async function refreshHardware(definitions,progress){
     if(!definitions.length)return {updatedAt:new Date().toISOString(),stocks:[],warnings:[]};
     if(definitions.some(s=>!/^\d{6}$/.test(s.code)))throw Error('股票代码必须为6位数字');
     progress?.('正在刷新硬件AI行情…');
     const chunks=[];for(let i=0;i<definitions.length;i+=80)chunks.push(definitions.slice(i,i+80));
-    const batches=await pool(chunks,async list=>{const secids=list.map(s=>(s.code.startsWith('6')?'1.':'0.')+s.code).join(',');const d=(await request('https://push2.eastmoney.com/api/qt/ulist.np/get',{secids,fltt:2,fields:'f2,f3,f6,f8,f12,f13,f14,f20,f23,f115,f124'})).data;if(!d?.diff)throw Error('标的行情暂不可用');return Array.isArray(d.diff)?d.diff:Object.values(d.diff)});
+    let usedTencent=false;
+    const batches=await pool(chunks,async list=>{try{const secids=list.map(s=>(s.code.startsWith('6')?'1.':'0.')+s.code).join(',');const d=(await request('https://push2.eastmoney.com/api/qt/ulist.np/get',{secids,fltt:2,fields:'f2,f3,f6,f8,f12,f13,f14,f20,f23,f115,f124'})).data;if(!d?.diff)throw Error('标的行情暂不可用');return Array.isArray(d.diff)?d.diff:Object.values(d.diff)}catch{usedTencent=true;return tencentQuotes(list.map(item=>item.code)).catch(()=>[]);}});
     const quotes=new Map(batches.flat().map(q=>[q.f12,q]));let profiles=[],warnings=[];
     try{const d=await request('https://datacenter.eastmoney.com/securities/api/data/v1/get',{reportName:'RPT_F10_ORG_BASICINFO',columns:'SECURITY_CODE,SECURITY_NAME_ABBR,MAIN_BUSINESS,ORG_PROFILE,BOARD_NAME_1LEVEL,BOARD_NAME_2LEVEL',filter:`(SECURITY_CODE in (${definitions.map(s=>'"'+s.code+'"').join(',')}))`,pageSize:500},'callback');if(!d.result?.data)throw Error();profiles=d.result.data}catch{warnings.push('公司主营资料暂不可用')}
     const byCode=new Map(profiles.map(p=>[p.SECURITY_CODE,p]));
     const stocks=definitions.map(item=>{const q=quotes.get(item.code),p=byCode.get(item.code);return {...item,nameVerified:q?.f14||item.name||item.code,market:item.code.startsWith('6')?'沪市':/^[489]/.test(item.code)?'北交所':'深市',price:n(q?.f2),change:n(q?.f3),amount:n(q?.f6),turnover:n(q?.f8),cap:n(q?.f20),pe:n(q?.f115),pb:n(q?.f23),quoteTime:n(q?.f124),industry:p?.BOARD_NAME_2LEVEL||p?.BOARD_NAME_1LEVEL||null,business:p?.MAIN_BUSINESS||p?.ORG_PROFILE||null,source:'https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/Index?type=web&code='+(item.code.startsWith('6')?'SH':/^[489]/.test(item.code)?'BJ':'SZ')+item.code,companyVerified:Boolean(p),available:Boolean(q?.f14)&&n(q?.f2)>0}});
     if(!stocks.some(s=>s.available))throw Error('未取得有效A股行情，请核对代码或稍后重试');
-    return {updatedAt:new Date().toISOString(),source:'东方财富浏览器直连行情与公司资料',stocks,warnings,live:true};
+    return {updatedAt:new Date().toISOString(),source:usedTencent?'公开行情回退 · 腾讯行情与东方财富公司资料':'东方财富浏览器直连行情与公司资料',stocks,warnings,live:true};
   }
   async function hardwareOrders(stock){
     const announcement=async(url,params)=>{const target=new URL(url);Object.entries(params).forEach(([k,v])=>target.searchParams.set(k,v));const response=await fetch(target,{signal:AbortSignal.timeout(18000)});if(!response.ok)throw Error('公告服务响应 '+response.status);return response.json()};

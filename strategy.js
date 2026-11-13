@@ -45,13 +45,13 @@
             data=Array.isArray(body.data.diff)?body.data.diff:Object.values(body.data.diff);break;
           }catch{}
         }
-        if(!data){failed+=batch.length;continue;}
+        if(!data){try{data=await window.RadarTencentQuotes(batch);}catch{failed+=batch.length;continue;}}
         for(const row of data){if(!batch.includes(row.f12))continue;const numeric=v=>v!==null&&v!==''&&v!=='-'&&Number.isFinite(Number(v))?Number(v):null;next[row.f12]={price:numeric(row.f2),change:numeric(row.f3),amount:numeric(row.f6),time:numeric(row.f124)};}
       }
       if(current!==epoch||request!==quoteEpoch||!report)return;
       quotes=next;quoteFetchedAt=Date.now();render();
       const valid=Object.values(quotes).filter(q=>window.StrategyRanking.quoteState(q).valid),times=valid.map(q=>q.time);
-      $('quoteStatus').textContent=`行情来源：东方财富公开行情 · 有效 ${valid.length}/${codes.length} · 获取于 ${new Date(quoteFetchedAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})}`+(times.length?' · 源时间 '+when(Math.min(...times))+' 至 '+when(Math.max(...times)):' · 暂无可确认的今日行情')+(failed?` · ${failed}只请求失败`:'')+'。休市时显示最新收盘行情；日线池不因行情刷新扩充。';
+      $('quoteStatus').textContent=`行情来源：东方财富 / 腾讯公开行情 · 有效 ${valid.length}/${codes.length} · 获取于 ${new Date(quoteFetchedAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})}`+(times.length?' · 源时间 '+when(Math.min(...times))+' 至 '+when(Math.max(...times)):' · 暂无可确认的今日行情')+(failed?` · ${failed}只请求失败`:'')+'。休市时显示最新收盘行情；日线池不因行情刷新扩充。';
     }finally{if(current===epoch&&request===quoteEpoch){quoteBusy=false;$('refreshQuotes').disabled=false;}}
   }
   async function load(requestEpoch, onlyIfChanged=false){
