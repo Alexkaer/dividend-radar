@@ -15,7 +15,13 @@
     $('marketState').textContent='快照生成 '+new Date(d.updatedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
     const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'});
     if(d.asOf!==today)$('marketAlert').textContent='当前展示 '+d.asOf+' 的收盘快照，可能因休市或更新延迟。请核对日期。';
-    if(d.partialSource)$('marketAlert').textContent+=d.partialSource;
+    const turnoverDate=d.turnover.days.at(-1).date;
+    const sectorDate=d.sectors.items[0]?.endDate;
+    const sections=[];
+    if(turnoverDate!==d.asOf)sections.push('成交额历史快照 '+turnoverDate);
+    if(sectorDate&&sectorDate!==d.asOf)sections.push('行业榜历史快照 '+sectorDate);
+    if(sections.length)$('marketAlert').textContent+=' '+sections.join(' · ')+'。';
+    if(d.partialSource)$('marketAlert').textContent+=' '+d.partialSource;
     $('indices').innerHTML=d.indices.map(r=>`<article><div><span>${esc(r.name)}</span><small>${esc(r.code)}</small></div><b>${fmt(r.close)}</b><strong class="${tone(r.change)}">${pct(r.change)}</strong><small>${esc(d.session||'行情快照')} · ${esc(r.date)}</small></article>`).join('');
     const b=d.breadth,m=d.sentiment,l=d.limits;
     $('moodScore').textContent=m.score??'—';$('moodLabel').textContent=m.label;
@@ -27,7 +33,7 @@
     $('breadthBar').innerHTML=[['#ff869b',b.up],['#7dfbd3',b.down],['#566c78',b.flat]].map(([c,n])=>`<span style="background:${c};width:${n/b.total*100}%"></span>`).join('');
     $('limitUp').textContent=fmt(l.up,0);$('limitDown').textContent=fmt(l.down,0);$('advanceShare').textContent=b.advanceShare==null?'—':fmt(b.advanceShare*100,1)+'%';$('limitScope').textContent=l.scope;
     const v=d.turnover,intraday=d.session==='盘中快照';
-    $('volumeMetrics').innerHTML=[[d.partialSource?'成交额 '+v.days.at(-1).date:intraday?'当前累计成交额':'今日成交额',fmt(v.today/1e12)+' 万亿',''],[intraday?'当前累计较昨全日':'较昨日',pct(v.dayChangePct),tone(v.dayChangePct)],[intraday?'近5日比较（含盘中）':'近5日较此前5日',pct(v.fiveDayChangePct),tone(v.fiveDayChangePct)],['最近5日日均',fmt(v.recentFiveDayAverage/1e12)+' 万亿','']].map(([label,value,cls])=>`<div><small>${label}</small><b class="${cls}">${value}</b></div>`).join('');
+    $('volumeMetrics').innerHTML=[[turnoverDate!==d.asOf?'历史成交额 '+turnoverDate:intraday?'当前累计成交额':'今日成交额',fmt(v.today/1e12)+' 万亿',''],[intraday?'当前累计较昨全日':'较上一交易日',pct(v.dayChangePct),tone(v.dayChangePct)],[intraday?'近5日比较（含盘中）':'近5日较此前5日',pct(v.fiveDayChangePct),tone(v.fiveDayChangePct)],['最近5日日均',fmt(v.recentFiveDayAverage/1e12)+' 万亿','']].map(([label,value,cls])=>`<div><small>${label}</small><b class="${cls}">${value}</b></div>`).join('');
     $('volumeChart').innerHTML=volumeSVG(v.days);$('volumeScope').textContent=v.scope;
     $('volumeRows').innerHTML=v.days.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.shanghai/1e8)}</td><td>${fmt(r.shenzhen/1e8)}</td><td>${fmt(r.amount/1e8)}</td></tr>`).join('');
     sectorData=d.sectors;renderSectors();
