@@ -78,7 +78,7 @@
     if(!response.ok)throw Error('腾讯日K暂不可用');
     const data=(await response.json()).data?.[symbol],rows=data?.qfqday||data?.day;
     if(!rows?.length)throw Error('腾讯日K为空');
-    return rows.map((r,i)=>({date:r[0],close:n(r[2]),amount:null,change:i?(Number(r[2])/Number(rows[i-1][2])-1)*100:null}));
+    return rows.map((r,i)=>({date:r[0],close:n(r[2]),high:n(r[3]),amount:null,change:i?(Number(r[2])/Number(rows[i-1][2])-1)*100:null}));
   }
   window.RadarTencentQuotes=tencentQuotes;
   let quotePromise=null;
@@ -176,6 +176,28 @@
   }
 
   async function refreshMarket(seed,progress){
+    try{return await refreshFullMarket(seed,progress);}
+    catch(error){
+      if(!seed)throw error;
+      const [all,histories]=await Promise.all([sinaQuotes(),Promise.allSettled(INDEX.map(async ([secid,name])=>{
+        const bar=(await tencentKline(secid,3,0)).at(-1);
+        return {...bar,code:secid.split('.')[1],name};
+      }))]);
+      const indices=histories.flatMap(r=>r.status==='fulfilled'?[r.value]:[]);
+      const asOf=indices.find(r=>r.code==='000001')?.date;
+      if(!asOf||asOf<seed.asOf)throw error;
+      const changes=all.filter(q=>q.f2>0&&q.f3!=null&&q.f124&&day(q.f124*1000)===asOf).map(q=>q.f3);
+      if(changes.length<4500)throw error;
+      const up=changes.filter(v=>v>0).length,down=changes.filter(v=>v<0).length;
+      return {...seed,asOf,updatedAt:new Date().toISOString(),session:'公开行情快照',
+        indices:indices.filter(r=>r.date===asOf),
+        breadth:{up,down,flat:changes.length-up-down,total:changes.length,advanceShare:up+down?up/(up+down):null},
+        limits:{up:null,down:null,scope:'涨跌停池暂未核验'},
+        sentiment:{label:'待判断',score:null,method:'涨跌停池暂未核验'},
+        partialSource:'腾讯指数 · 新浪市场广度。成交额与行业榜沿用各自标注日期。'};
+    }
+  }
+  async function refreshFullMarket(seed,progress){
     progress?.('正在获取指数和市场广度…');
     const [all,histories,sh,sz]=await Promise.all([quotes(progress),pool(INDEX,async item=>({item,bars:await kline(item[0],3)})),kline('1.000001',20,0,true),kline('0.399001',20,0,true)]);
     const asOf=sh.at(-1).date;if(sz.at(-1).date!==asOf)throw Error('沪深量能日期不匹配');
@@ -214,7 +236,14 @@
     const asOf=day(Date.now()),codes=selected.map(s=>'"'+s.code+'"').join(','),[latest,previous]=quarters(asOf),known=`(NOTICE_DATE<='${asOf} 23:59:59')(REPORT_DATE<='${asOf}')(SECURITY_TYPE_CODE="058001001")`,fields='SECURITY_CODE,INDUSTRY_NAME,REPORT_DATE,NOTICE_DATE,TOTAL_OPERATE_INCOME,OPERATE_INCOME,PARENT_NETPROFIT,DEDUCT_PARENT_NETPROFIT,TOI_RATIO,PARENT_NETPROFIT_RATIO,DPN_RATIO';
     const signalSession=kline('1.000001',5).then(bars=>window.HardwareMetrics.completedSession(bars)).catch(()=>null);
     const earnings=(async()=>{const [income,cash]=await Promise.all([report('RPT_DMSK_FN_INCOME',`(SECURITY_CODE in (${codes}))(REPORT_DATE>='${ago(previous,370)}')`+known,fields),report('RPT_DMSK_FN_CASHFLOW',`(SECURITY_CODE in (${codes}))(REPORT_DATE>='${previous}')`+known,'SECURITY_CODE,REPORT_DATE,NETCASH_OPERATE')]);for(const s of selected){const rows=income.filter(r=>r.SECURITY_CODE===s.code).sort((a,b)=>b.REPORT_DATE.localeCompare(a.REPORT_DATE));if(!rows.length){s.fundamentals={status:'unavailable',label:'待更新'};continue}const row=rows[0],period=row.REPORT_DATE.slice(0,10),prior=rows.find(r=>r.REPORT_DATE.slice(0,10)===String(Number(period.slice(0,4))-1)+period.slice(4));s.fundamentals={...company(row,prior,cash.find(r=>r.SECURITY_CODE===s.code&&r.REPORT_DATE.slice(0,10)===period)),checkedAt:asOf,source:'https://data.eastmoney.com/bbsj/'+s.code+'.html'}}})().catch(()=>{for(const s of selected)s.fundamentals={status:'unavailable',label:'待更新'}});
-    await Promise.all([earnings,pool(selected,async s=>{const date=s.quoteTime?day(s.quoteTime*1000):asOf;try{const raw=(await request('https://push2his.eastmoney.com/api/qt/stock/kline/get',{secid:(s.code.startsWith('6')?'1.':'0.')+s.code,klt:101,fqt:1,lmt:100000,end:20500101,fields1:'f1,f2,f3,f4,f5,f6',fields2:'f51,f52,f53,f54,f55,f56,f57'})).data;s.history=window.HardwareMetrics.historicalHigh(raw,s.price,date);s.dailySignal=window.HardwareMetrics.dailySignal(raw,await signalSession)}catch{s.history={status:'unavailable'};s.dailySignal={status:'unavailable',matches:null,reason:'日K暂不可用'}}try{s.orders=await hardwareOrders(s)}catch(error){s.orders=s.orders?.checkedAt?{...s.orders,cached:true}:{status:'unavailable',summary:'订单公告暂不可用',items:[]}}progress?.('高点、领涨与经营数据核验 '+(++done)+'/'+selected.length);},3)]);
+    await Promise.all([earnings,pool(selected,async s=>{const date=s.quoteTime?day(s.quoteTime*1000):asOf;try{const raw=(await request('https://push2his.eastmoney.com/api/qt/stock/kline/get',{secid:(s.code.startsWith('6')?'1.':'0.')+s.code,klt:101,fqt:1,lmt:100000,end:20500101,fields1:'f1,f2,f3,f4,f5,f6',fields2:'f51,f52,f53,f54,f55,f56,f57'})).data;s.history=window.HardwareMetrics.historicalHigh(raw,s.price,date);s.dailySignal=window.HardwareMetrics.dailySignal(raw,await signalSession)}catch{
+      try{
+        const rows=await tencentKline((s.code.startsWith('6')?'1.':'0.')+s.code,320,1);
+        const raw={klines:rows.map(r=>[r.date,'',r.close,r.high].join(','))};
+        s.history=window.HardwareMetrics.historicalHigh(raw,s.price,date);
+        s.dailySignal=window.HardwareMetrics.dailySignal(raw,await signalSession);
+      }catch{s.history={status:'unavailable'};s.dailySignal={status:'unavailable',matches:null,reason:'日K暂不可用'};}
+    }try{s.orders=await hardwareOrders(s)}catch(error){s.orders=s.orders?.checkedAt?{...s.orders,cached:true}:{status:'unavailable',summary:'订单公告暂不可用',items:[]}}progress?.('高点、领涨与经营数据核验 '+(++done)+'/'+selected.length);},3)]);
     const ranks=window.HardwareMetrics.leaders(stocks);for(const s of stocks)s.leaderRank=ranks.get(s.code)||null;return stocks;
   }
   const cache={get(key){try{const v=JSON.parse(localStorage.getItem('radar-live-'+key));return v?.version===1?v.data:null}catch{return null}},put(key,data){try{localStorage.setItem('radar-live-'+key,JSON.stringify({version:1,data}))}catch{}}};

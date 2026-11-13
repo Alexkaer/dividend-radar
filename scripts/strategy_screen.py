@@ -445,7 +445,7 @@ def tencent_daily(symbol, end, count, adjust='', *, full=False):
 
 
 def public_ma_pullback(previous, mode, selected=('maPullback',)):
-    """Publish a labeled partial snapshot from the available public limit-up pools."""
+    """Build independently verified strategy groups from public market data."""
     today=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
     end=(today-dt.timedelta(days=1)).isoformat() if mode=='auction' else today.isoformat()
     history=36 if 'second' in selected else 21
@@ -471,8 +471,6 @@ def public_ma_pullback(previous, mode, selected=('maPullback',)):
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
         pools=dict(executor.map(safe_pool,dates))
     available={day for day,rows in pools.items() if rows}
-    if len(available)<2:
-        raise RuntimeError('Public limit-up pools unavailable')
     universe={}
     flags={}
     for day,rows in pools.items():
@@ -534,13 +532,13 @@ def public_ma_pullback(previous, mode, selected=('maPullback',)):
                     else 0))
             items={}
             candidates=evaluate(bars)
-            eligible=set(selected)&candidates.keys()-{'maPullback'}
+            eligible=(set(selected)&candidates.keys())-{'maPullback'}
             for kind in eligible:
                 if 'ST' in name.upper() or '退' in name:
                     continue
                 if kind=='pullback' and (code not in flags or not pullback_security_allowed(code,name)):
                     continue
-                if kind=='second' and code not in flags or kind=='triple' and code not in triple_codes:
+                if (kind=='second' and code not in flags) or (kind=='triple' and code not in triple_codes):
                     continue
                 age_limit=(dt.date.fromisoformat(session)-dt.timedelta(days=366)).isoformat()
                 if tencent_daily(symbol,age_limit,1):
@@ -572,7 +570,9 @@ def public_ma_pullback(previous, mode, selected=('maPullback',)):
     report.setdefault('failures',[])
     updated=False
     for kind in selected:
-        if previous.get('groupAsOf',{}).get(kind,'')>session or kind=='triple' and not triple_codes:
+        if previous.get('groupAsOf',{}).get(kind,'')>session:
+            continue
+        if (kind=='triple' and not triple_codes) or (kind!='triple' and len(available)<2):
             continue
         scope=triple_codes if kind=='triple' else flags
         checked_count=sum(ok for code,_,ok in checked if code in scope)
