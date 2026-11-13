@@ -518,6 +518,15 @@ def main():
             except Exception: return code,[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
             public_bars=dict(executor.map(load_public,public_codes))
+    ma_contexts={}
+    if mode=='intraday' and 'maPullback' in selected:
+        def load_context(code):
+            try: return code,intraday_context(code,args.cutoff)
+            except Exception: return code,{}
+        ma_codes=[code for code in codes if 'maPullback' in membership[code]]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            ma_contexts=dict(executor.map(load_context,ma_codes))
+    ma_missing_cutoff=set()
     for start in range(0,len(codes),5):
         batch=codes[start:start+5]
         # MX's explicit "前复权" wording can resolve to fixed-base close for only
@@ -559,8 +568,9 @@ def main():
             context={}
             if mode=='intraday':
                 try:
-                    context=intraday_context(code,args.cutoff)
-                    if context.get('quoteTime') and (not args.cutoff or context.get('quoteTime','')[11:16]==args.cutoff):
+                    context=ma_contexts[code] if code in ma_contexts else intraday_context(code,args.cutoff)
+                    quote_time=context.get('quoteTime','')
+                    if quote_time[:10]==session and (not args.cutoff or quote_time[11:16]==args.cutoff):
                         bars[-1].update(open=context['sessionOpen'],high=context['sessionHigh'],low=context['sessionLow'],
                             close=context['currentPrice'],volume=context['sessionVolume'],
                             change=(context['currentPrice']/bars[-2]['close']-1)*100,partial=True)
@@ -571,6 +581,8 @@ def main():
             result=evaluate(bars)
             for kind,item in result.items():
                 if kind in membership[code]:
+                    if kind=='maPullback' and mode=='intraday' and args.cutoff and not bars[-1].get('partial'):
+                        continue
                     if mode=='auction':
                         status='竞价观察 · 上一交易日回调，今日待确认' if kind=='maPullback' else '竞价观察 · 昨日收复，今日待确认'
                         item.update(status=status,provisional=True)
@@ -581,6 +593,8 @@ def main():
                         apply_trade_plan(item,context,mode)
                     item['evaluatedAt']=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
                     groups[kind].append(dict(code=code,name=universe[code],**item))
+            if code in ma_contexts and args.cutoff and not bars[-1].get('partial'):
+                ma_missing_cutoff.add(code)
         print('K-line progress:',min(start+5,len(codes)),'/',len(codes),flush=True)
     for kind in selected:
         if kind == 'maPullback':
@@ -594,12 +608,17 @@ def main():
         coverage.setdefault(kind,dict(total=0,returned=0,complete=False,conditions=[]))
     for kind in selected:
         group_codes={code for code in codes if kind in membership[code]}
-        if kind == 'maPullback' and group_codes and not verified_codes & group_codes:
+        group_verified=verified_codes & group_codes
+        group_failures=[item for item in failures if item['code'] in group_codes]
+        if kind == 'maPullback':
+            group_verified-=ma_missing_cutoff
+            group_failures.extend(dict(code=code,name=universe[code],reason='缺少指定截点的当日分时价')
+                for code in sorted(ma_missing_cutoff))
+        if kind == 'maPullback' and group_codes and not group_verified:
             raise RuntimeError('No verified MA pullback daily K-lines; retaining previous snapshot')
         group_dates[kind]=session
         group_generated[kind]=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
-        group_stats[kind]=dict(verified=len(verified_codes & group_codes),universe=len(group_codes),
-            failures=[item for item in failures if item['code'] in group_codes],mode=mode)
+        group_stats[kind]=dict(verified=len(group_verified),universe=len(group_codes),failures=group_failures,mode=mode)
     if 'pullback' in selected: rule_versions['pullback']=PULLBACK_RULE_VERSION
     report=dict(version=1,asOf=session,generatedAt=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(),
         source='东方财富妙想 mx-xuangu宽筛 + 东方财富公开前复权行情API交叉复核',queries=queries,coverage=coverage,verified=verified,universe=len(codes),failures=failures,
