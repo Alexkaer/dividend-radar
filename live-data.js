@@ -148,6 +148,29 @@
     for(const s of stocks){const rows=companies.filter(r=>r.SECURITY_CODE===s.code).sort((a,b)=>b.REPORT_DATE.localeCompare(a.REPORT_DATE));if(!rows.length){s.fundamentals={status:'unavailable',label:'待更新',industry:'未分类'};continue}const row=rows[0],p=row.REPORT_DATE.slice(0,10),prior=rows.find(r=>r.REPORT_DATE.slice(0,10)===String(Number(p.slice(0,4))-1)+p.slice(4)),cash=cashes.find(r=>r.SECURITY_CODE===s.code&&r.REPORT_DATE.slice(0,10)===p),f=company(row,prior,cash),newPeers=recent.filter(r=>r.INDUSTRY_NAME===f.industry),oldPeers=old.filter(r=>r.INDUSTRY_NAME===f.industry);let sector=sectorSummary(newPeers,oldPeers.length),period=latest;if(sector.label==='样本不足'&&oldPeers.length){sector=sectorSummary(oldPeers,oldPeers.length);period=previous}f.sector={...sector,reportDate:period,industry:f.industry,periodFallback:period!==latest};Object.assign(f,{checkedAt:asOf,source:'https://data.eastmoney.com/bbsj/'+s.code+'.html',method:'累计财报同比规则分析，非投资评级；同行取全A股同分类、同报告期。'});s.fundamentals=f;}
   }
   async function refreshStocks(seed,progress){
+    try{return await refreshFullStocks(seed,progress);}
+    catch(error){
+      if(!seed?.stocks?.length)throw error;
+      progress?.('正在用腾讯行情更新已有红利名单…');
+      const codes=seed.stocks.map(stock=>stock.code),batches=[];
+      for(let i=0;i<codes.length;i+=50)batches.push(codes.slice(i,i+50));
+      const rows=(await pool(batches,async batch=>tencentQuotes(batch).catch(()=>[]))).flat();
+      const latest=new Map(rows.map(row=>[row.f12,row]));
+      let updated=0;
+      const stocks=seed.stocks.map(stock=>{
+        const quote=latest.get(stock.code);
+        if(!quote||quote.f124<(stock.quoteTime||0)||!Number.isFinite(stock.cash))return stock;
+        updated++;
+        return {...stock,price:quote.f2,change:quote.f3,quoteTime:quote.f124,
+          yieldRate:fixed(stock.cash/quote.f2*100),pe:quote.f115??stock.pe,
+          pb:quote.f23??stock.pb,cap:quote.f20??stock.cap};
+      });
+      if(!updated)throw Error('暂未取得可用的腾讯行情');
+      return {...seed,stocks,quoteAt:Math.max(...stocks.map(stock=>stock.quoteTime||0)),source:'腾讯公开行情',
+        warnings:[`腾讯已更新 ${updated}/${stocks.length} 只；分红统计截至 ${seed.windowEnd||'原快照日期'}，沿用原名单`]};
+    }
+  }
+  async function refreshFullStocks(seed,progress){
     const all=await quotes(progress),valid=all.filter(q=>n(q.f2)>0&&n(q.f20)>50e9),stamp=Math.max(...valid.map(q=>n(q.f124)||0));if(!stamp)throw Error('行情时间无效');
     const asOf=day(stamp*1000),start=ago(asOf,365);progress?.('正在刷新近一年现金分红…');
     const dividends=await report('RPT_SHAREBONUS_DET',`(EX_DIVIDEND_DATE>'${start}')(EX_DIVIDEND_DATE<='${asOf}')(ASSIGN_PROGRESS="实施分配")`);
