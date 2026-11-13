@@ -78,6 +78,57 @@ def sector_ranking(as_of):
     with ThreadPoolExecutor(max_workers=4) as pool: today=list(pool.map(daily_verify,sorted([r for r in rows if number(r.get('f3')) is not None],key=lambda r:r['f3'],reverse=True)[:15]))
     return dict(items=top,todayItems=today,universe=d['total'],scope='东方财富行业板块（含不同层级，可能存在重叠），不含概念板块；当日与5日榜各前15，分别用日K核对。')
 
+def public_turnover(as_of):
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+    year=int(as_of[:4])
+    def history(symbol):
+        rows={}
+        for start in ({year-1,year} if as_of[5:7]=='01' else {year}):
+            query=urlencode(dict(_var='kline_dayqfq',param=f'{symbol},day,{start}-01-01,{start+1}-12-31,640,qfq',
+                r='0.8205512681390605'))
+            url='https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get?'+query
+            with urlopen(Request(url,headers={'User-Agent':'Mozilla/5.0'}),timeout=15) as response:
+                body=response.read().decode()
+            payload=json.loads(body.split('=',1)[-1].rstrip(';\r\n'))['data'][symbol]
+            for row in payload.get('day') or payload['qfqday']:
+                amount=number(row[8]) if len(row)>8 else None
+                if row[0]<=as_of and amount is not None and amount>0:
+                    rows[row[0]]=dict(date=row[0],amount=amount*10000)
+        return list(rows.values())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sh,sz=pool.map(history,('sh000001','sz399001'))
+    result=turnover_summary(sh,sz,as_of)
+    result['scope']+=' 数据来源：腾讯证券日K成交额。'
+    return result
+
+
+def public_sectors(as_of):
+    import akshare as ak
+    universe=ak.index_realtime_sw('一级行业').drop_duplicates(subset='指数代码')
+    if len(universe)<31:
+        raise ValueError('Incomplete Shenwan first-level industry universe')
+    def rank(row):
+        code,name=row
+        history=ak.index_hist_sw(symbol=str(code))
+        bars=history.assign(session=history['日期'].astype(str))
+        bars=bars[bars.session<=as_of].sort_values('session').tail(6)
+        if len(bars)!=6 or bars.session.iloc[-1]!=as_of:
+            raise ValueError(f'Shenwan history not current: {code}')
+        closes=bars['收盘'].tolist()
+        if any(not (value>0) for value in closes):
+            raise ValueError(f'Invalid Shenwan close: {code}')
+        return dict(code=str(code),name=name,change=(closes[-1]/closes[-2]-1)*100,
+            fiveDayChange=(closes[-1]/closes[0]-1)*100,startDate=bars.session.iloc[0],
+            priorDate=bars.session.iloc[-2],endDate=as_of)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rows=list(pool.map(rank,universe[['指数代码','指数名称']].itertuples(index=False,name=None)))
+    five=sorted(rows,key=lambda row:-row['fiveDayChange'])[:15]
+    daily=sorted(rows,key=lambda row:-row['change'])[:15]
+    return dict(items=five,todayItems=[{**row,'startDate':row['priorDate']} for row in daily],
+        universe=len(rows),provider='shenwan',scope='申万一级行业指数，按收盘日K计算当日与近5交易日涨幅。')
+
+
 def full_snapshot():
     now=datetime.now(ZoneInfo('Asia/Shanghai'));quotes=closing_quotes()
     as_of=datetime.fromtimestamp(max(q['f124'] for q in quotes.values()),ZoneInfo('Asia/Shanghai')).date().isoformat()
@@ -119,7 +170,10 @@ def public_snapshot(previous):
         except (OSError,ValueError,KeyError,ArithmeticError,TypeError): pass
     as_of=next((row['date'] for row in indices if row['code']=='000001'),None)
     if as_of!=day or not any(row['code']=='399001' and row['date']==day for row in indices):
-        raise ValueError('Public index closing date could not be verified')
+        if previous['asOf']!=day:
+            raise ValueError('Public index closing date could not be verified')
+        as_of=day
+        indices=previous['indices']
     if previous['asOf']>as_of:return previous
     data={**previous,'asOf':as_of,'updatedAt':now.isoformat(),'session':'公开收盘快照',
         'indices':[row for row in indices if row['date']==as_of]}
@@ -144,17 +198,19 @@ def public_snapshot(previous):
         data['limits']=dict(up=None,down=None,scope='当日涨跌停池暂不可用')
         data['sentiment']=dict(label='待判断',score=None)
     with ThreadPoolExecutor(max_workers=3) as pool:
-        sh=pool.submit(kline,'1.000001',12)
-        sz=pool.submit(kline,'0.399001',12)
-        sectors=pool.submit(sector_ranking,as_of)
+        turnover=pool.submit(public_turnover,as_of)
+        sectors=pool.submit(public_sectors,as_of)
         try:
-            data['turnover']=turnover_summary(sh.result(),sz.result(),as_of)
-            notes.append('成交额来自东方财富')
-        except Exception:
+            data['turnover']=turnover.result()
+            notes.append('成交额来自腾讯证券')
+        except Exception as error:
+            print('Public turnover unavailable:',error)
             notes.append('成交额保留原日期')
         try:
             data['sectors']=sectors.result()
-        except Exception:
+            notes.append('行业榜来自申万一级行业指数')
+        except Exception as error:
+            print('Public sectors unavailable:',error)
             notes.append('行业榜保留原日期')
     data['partialSource']='。'.join(notes)+'。'
     return data

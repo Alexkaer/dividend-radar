@@ -64,6 +64,7 @@ jobs:
         id: market_refresh
         continue-on-error: true
         run: |
+          python -m pip install akshare==1.20.42
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             python scripts/update_market.py --public-only
           else
